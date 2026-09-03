@@ -23,6 +23,9 @@ const PLATFORMS: &[(&str, &str, &str, &str, &str)] = &[
     ("qemu_rv32_virt"     , "0x80100000", "0x0100000", "0x80300000", "1024K"  ),
     ("raspberry_pi_pico"  , "0x10040000", "256K"     , "0x20012000", "192K"   ),
     ("raspberry_pi_pico_2", "0x10040000", "256K"     , "0x20020000", "392K"   ),
+    // BENCH: second app slot, so two apps can be co-resident. leak_claim is
+    // 4K, so slot 2 starts one 16K page clear of it.
+    ("raspberry_pi_pico_2_slot2", "0x10041000", "252K"     , "0x20030000", "256K"   ),
     ("stm32f3discovery"   , "0x08020000", "0x0020000", "0x20004000", "48K"    ),
     ("stm32f412gdiscovery", "0x08030000", "256K"     , "0x20004000", "112K"   ),
     ("nano33ble"          , "0x00050000", "704K"     , "0x20005000", "240K"   ),
