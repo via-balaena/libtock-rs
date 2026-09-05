@@ -53,6 +53,10 @@ impl FakeStepper {
 
     /// Whether a movement is outstanding. The point of the deferred mode: it
     /// makes "the coils are still energised" observable to a test.
+    ///
+    /// Only the async tests ask: a blocking movement is over by the time the
+    /// call returns, so there is no moment from which to observe one running.
+    #[cfg(feature = "async")]
     fn is_running(&self) -> bool {
         self.running.get()
     }
