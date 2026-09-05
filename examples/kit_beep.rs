@@ -24,6 +24,36 @@
 //! for. The gap is the cost of a syscall and an alarm per half-cycle, and it is
 //! the argument for a PWM driver rather than a bug in this example -- PWM is
 //! not yet in the RP2350 crate, which is why this exists at all.
+//!
+//! # What it did on hardware, 2026-09-05
+//!
+//! The kit's beeper is **passive**: the three square waves rose in pitch, which
+//! an active buzzer cannot do, since its pitch is its own. The three "beeps" of
+//! the first phase were the click pairs a bare transducer makes at each edge.
+//!
+//! ```text
+//! asked  440 Hz, achieved 360 Hz over 610783 ticks
+//! asked  880 Hz, achieved 609 Hz over 721488 ticks
+//! asked 1320 Hz, achieved 793 Hz over 831346 ticks
+//! ```
+//!
+//! Reproducible across runs to a few hundred ticks in six hundred thousand.
+//! The alarm runs at 1 MHz, and backing the overhead out of the tick counts
+//! gives **252 microseconds per edge at all three frequencies** -- 111,202
+//! ticks over 440 edges, 221,348 over 880, 332,372 over 1320. A constant
+//! per-iteration cost: one GPIO command plus a whole `sleep_for`, which is a
+//! share scope, a subscribe, a command, a yield, an upcall and an unsubscribe.
+//!
+//! Two things follow, and the second is the interesting one.
+//!
+//! The ceiling is about **2 kHz** even with a zero-length requested delay,
+//! because 252 us is the floor on a half-period.
+//!
+//! And a constant per-edge cost does not shift a tune, it **compresses** it:
+//! the higher the note, the larger the fraction of its period the overhead
+//! eats. 440 Hz plays 3.5 semitones flat, 1320 Hz nearly nine. No melody
+//! survives that. "Userspace timing is imprecise" is a weaker way to say it
+//! than "the instrument plays flat, and worse the higher you go".
 
 #![no_main]
 #![no_std]
