@@ -19,10 +19,26 @@
 //! capsule and the mux, so there is no reason to make a reader take an executor
 //! on trust as well.
 //!
-//! The sleep is required, not cosmetic. `ProcessConsole::start()` does not arm a
-//! receive — it sets a 100 ms alarm and arms in the callback. A read issued
-//! before that fires finds an idle mux, takes the ordinary path and stays
-//! outstanding, which looks exactly like the defect being absent.
+//! About the sleep. `ProcessConsole::start()` does not arm a receive — it sets a
+//! 100 ms alarm and arms in the callback. In principle a read issued before that
+//! fires finds an idle mux, takes the ordinary path and stays outstanding, which
+//! would look exactly like the defect being absent.
+//!
+//! In practice that window is not reachable from an application. Removing the
+//! sleep, and even issuing the read before any `writeln!` so that no kernel
+//! round trip precedes it, still yields `Err(BUSY)` under QEMU, with the
+//! process console's `tock$` prompt appearing first. The process does not get
+//! its first instruction until after the kernel's alarm has fired. So the sleep
+//! is not what creates the failure — it only makes the ordering legible.
+//!
+//! This matters for reading the result: there is no window in which an
+//! application can avoid the trigger, so "the app read too early" is not an
+//! available explanation for the BUSY.
+//!
+//! A real control needs a kernel without a ProcessConsole on that mux, which is
+//! a board change rather than an application one. Absent that, this example
+//! demonstrates the defect but cannot demonstrate its own ability to fail — a
+//! limitation worth stating rather than papering over.
 
 #![no_main]
 #![no_std]
