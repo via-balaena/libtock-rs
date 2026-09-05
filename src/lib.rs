@@ -28,6 +28,10 @@ pub mod alarm {
     use libtock_alarm as alarm;
     pub type Alarm = alarm::Alarm<super::runtime::TockSyscalls>;
     pub use alarm::{Convert, Hz, Milliseconds, Ticks};
+
+    /// The future returned by `Alarm::sleep_for_async`.
+    #[cfg(feature = "async")]
+    pub type Sleep = alarm::Sleep<super::runtime::TockSyscalls>;
 }
 pub mod ambient_light {
     use libtock_ambient_light as ambient_light;
@@ -48,6 +52,19 @@ pub mod console {
     use libtock_console as console;
     pub type Console = console::Console<super::runtime::TockSyscalls>;
     pub use console::ConsoleWriter;
+
+    /// The future returned by `Console::read_async`, reading up to `N` bytes.
+    #[cfg(feature = "async")]
+    pub type Read<const N: usize> =
+        console::Read<super::runtime::TockSyscalls, super::platform::DefaultConfig, N>;
+    #[cfg(feature = "async")]
+    pub use console::ReadOutput;
+}
+/// Driving futures. Named `futures` rather than `async` because the latter is a
+/// keyword and `libtock::r#async::block_on` is nobody's idea of an API.
+#[cfg(feature = "async")]
+pub mod futures {
+    pub use libtock_async::block_on;
 }
 pub mod gpio {
     use libtock_gpio as gpio;

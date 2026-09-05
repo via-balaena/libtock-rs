@@ -60,6 +60,12 @@ libtock_temperature = { path = "apis/sensors/temperature" }
 
 embedded-hal = { version = "1.0", optional = true }
 
+# Examples are otherwise auto-discovered; this one needs a section so that a
+# build without the `async` feature skips it instead of failing.
+[[example]]
+name = "async_sleep"
+required-features = ["async"]
+
 [build-dependencies]
 libtock_build_scripts = { path = "build_scripts" }
 
