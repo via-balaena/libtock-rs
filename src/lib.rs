@@ -131,6 +131,10 @@ pub mod stepper {
     use libtock_stepper as stepper;
     pub type Stepper = stepper::Stepper<super::runtime::TockSyscalls>;
     pub use stepper::Interval;
+
+    /// The future returned by `Stepper::step_forward_async`.
+    #[cfg(feature = "async")]
+    pub type Step = stepper::Step<super::runtime::TockSyscalls>;
 }
 pub mod temperature {
     use libtock_temperature as temperature;

@@ -29,6 +29,7 @@ async = [
     "libtock_alarm/async",
     "libtock_console/async",
     "libtock_gpio/async",
+    "libtock_stepper/async",
 ]
 
 [dependencies]

@@ -8,6 +8,11 @@ repository = "https://www.github.com/tock/libtock-rs"
 rust-version.workspace = true
 description = "libtock stepper motor driver"
 
+[features]
+# Adds `Future`-returning APIs alongside the blocking ones. Off by default so
+# apps that only call `step_forward` link no waker machinery.
+async = ["libtock_platform/async"]
+
 [dependencies]
 libtock_platform = { path = "../../../platform" }
 

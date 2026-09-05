@@ -105,6 +105,110 @@ impl<S: Syscalls, C: platform::subscribe::Config> Stepper<S, C> {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Async interface
+// -----------------------------------------------------------------------------
+
+/// The stepper-specific half of a [`Step`].
+#[cfg(feature = "async")]
+pub struct StepOp {
+    command_num: u32,
+    steps: u32,
+    interval: Interval,
+}
+
+#[cfg(feature = "async")]
+impl<S: Syscalls> platform::async_call::Operation<S> for StepOp {
+    /// Steps actually taken, fewer than requested if the movement was stopped.
+    type Value = u32;
+
+    fn start(&self) -> Result<(), ErrorCode> {
+        S::command(DRIVER_NUM, self.command_num, self.steps, self.interval.0).to_result()
+    }
+
+    fn cancel(&self) {
+        // This is the path [`Stepper::stop`] could not previously be reached
+        // from: a blocking `step_forward` holds the caller for the whole
+        // movement, so only an upcall handler could stop it. Dropping a `Step`
+        // now stops the motor from the owning process.
+        //
+        // It also throws away the step count. The stop provokes a completion
+        // upcall carrying the partial count, and the unsubscribe that follows a
+        // cancellation clears it (TRD 104) -- so a dropped `Step` de-energises
+        // the coils correctly and forgets where the motor is, which for an
+        // open-loop motor is the whole position. [`Step`] documents what to do
+        // instead.
+        let _ = S::command(DRIVER_NUM, command::STOP, 0, 0);
+    }
+
+    fn complete(&self, args: (u32, u32, u32)) -> Result<u32, ErrorCode> {
+        match args.0 {
+            0 => Ok(args.1),
+            other => Err(other.try_into().unwrap_or(ErrorCode::Fail)),
+        }
+    }
+}
+
+/// A future that resolves when a movement finishes, with the number of steps
+/// taken. Create one with [`Stepper::step_forward_async`].
+///
+/// # Stopping without losing the position
+///
+/// Dropping a `Step` stops the motor but discards the partial step count, and
+/// for an open-loop motor that count is the only record of where the shaft
+/// ended up. `select` drops its loser, so the obvious spelling loses it:
+///
+/// ```ignore
+/// // Stops the motor, and forgets how far it got.
+/// select(Stepper::step_forward_async(4096, Interval(2000)), press).await
+/// ```
+///
+/// Lend the future to `select` instead of giving it away. `Pin<&mut F>` is
+/// itself a `Future`, so the loser that `select` drops is the borrow, not the
+/// movement -- the subscription survives, and the completion upcall that the
+/// stop provokes still has somewhere to land:
+///
+/// ```ignore
+/// let mut step = pin!(Stepper::step_forward_async(4096, Interval(2000)));
+/// let press = pin!(button.next_edge(PinInterruptEdge::Falling));
+///
+/// let taken = match select(step.as_mut(), press).await {
+///     Either::Left(done) => done?,      // the movement finished on its own
+///     Either::Right(_) => {
+///         Stepper::stop()?;             // ask the capsule to stop ...
+///         step.await?                   // ... and collect the partial count
+///     }
+/// };
+/// ```
+#[cfg(feature = "async")]
+pub type Step<S, C = DefaultConfig> =
+    platform::async_call::Call<S, C, StepOp, DRIVER_NUM, { subscribe::COMPLETE }>;
+
+#[cfg(feature = "async")]
+impl<S: Syscalls, C: platform::subscribe::Config> Stepper<S, C> {
+    /// Returns a future that steps forward and resolves with the steps taken.
+    ///
+    /// Nothing is issued until the future is first polled, so a `Step` that is
+    /// built and dropped never moves the motor. See [`Step`] for how to stop one
+    /// without losing the count.
+    pub fn step_forward_async(steps: u32, interval: Interval) -> Step<S, C> {
+        platform::async_call::Call::new(StepOp {
+            command_num: command::STEP_FORWARD,
+            steps,
+            interval,
+        })
+    }
+
+    /// Steps in reverse. See [`Stepper::step_forward_async`].
+    pub fn step_reverse_async(steps: u32, interval: Interval) -> Step<S, C> {
+        platform::async_call::Call::new(StepOp {
+            command_num: command::STEP_REVERSE,
+            steps,
+            interval,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
