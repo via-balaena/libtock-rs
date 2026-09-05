@@ -198,17 +198,20 @@ impl<S: Syscalls, C: platform::subscribe::Config> core::future::Future for Sleep
         }
 
         // Only clone when the executor handed us a waker that would not wake the
-        // same task. `Cell` has no way to inspect in place, hence the take/put
-        // round trip.
+        // same task. `Cell` cannot inspect in place, hence the take/put round
+        // trip — which leaves the cell empty in between. That window is safe for
+        // the same reason the re-check below is: Tock delivers upcalls only
+        // inside Yield, so one cannot land here, and an upcall that somehow did
+        // would still be caught by the `fired` read that follows.
         let stored = this.shared.waker.take();
         this.shared.waker.set(match stored {
             Some(waker) if waker.will_wake(context.waker()) => Some(waker),
             _ => Some(context.waker().clone()),
         });
 
-        // Tock delivers upcalls only inside Yield, so one cannot land between
-        // the check at the top and this store. Re-check anyway: it costs a load
-        // and keeps the future correct under any executor.
+        // Re-check. Nothing can have fired since the read at the top of `poll`,
+        // per the invariant above, but this costs a single load and keeps the
+        // future correct under any executor.
         if this.shared.fired.get() {
             return Poll::Ready(Ok(()));
         }

@@ -93,6 +93,11 @@ fn drop_before_firing_unsubscribes() {
         1,
         "dropping an armed Sleep must unsubscribe"
     );
+    // Reach of this assertion: `fake::Alarm` implements only FREQUENCY and
+    // SET_RELATIVE, so it answers the stop with NoSupport. This proves the
+    // syscall is issued, not that a pending alarm is disarmed. The disarming is
+    // Tock's `capsules/core/src/alarm.rs` command 3, which clears the stored
+    // expiration and ignores both arguments.
     assert!(
         log.iter().any(|entry| matches!(
             entry,
