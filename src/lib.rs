@@ -64,7 +64,7 @@ pub mod console {
 /// keyword and `libtock::r#async::block_on` is nobody's idea of an API.
 #[cfg(feature = "async")]
 pub mod futures {
-    pub use libtock_async::block_on;
+    pub use libtock_async::{block_on, join, select, Either};
 }
 pub mod gpio {
     use libtock_gpio as gpio;
