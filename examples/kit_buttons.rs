@@ -20,6 +20,7 @@
 #![no_std]
 
 use core::fmt::Write;
+use libtock::alarm::{Alarm, Milliseconds};
 use libtock::console::Console;
 use libtock::gpio;
 use libtock::gpio::Gpio;
@@ -32,6 +33,10 @@ stack_size! {0x800}
 
 const LEFT: u32 = 14;
 const RIGHT: u32 = 15;
+
+/// One of the kit's two discrete LEDs. GP17 is the SPI capsule's chip select on
+/// the bench kernel, so GP16 is the one that is still a plain pin.
+const HEARTBEAT_LED: u32 = 16;
 
 fn main() {
     let mut console = Console::writer();
@@ -83,13 +88,38 @@ fn main() {
         let _ = writeln!(Console::writer(), "GP{index} -> {state:?}");
     });
 
+    // A heartbeat on the kit's LED, because there is otherwise no way to tell
+    // this app from a dead board. Nothing here moves, lights or sounds, so
+    // somebody asked to press a button has no cue that the moment has arrived
+    // -- and a console they cannot see live is not a cue. That cost two runs.
+    // The `Pin` has to outlive the `OutputPin` that borrows it, so it is bound
+    // here rather than produced inside a closure.
+    let mut led_pin = Gpio::get_pin(HEARTBEAT_LED);
+    let mut heartbeat = match led_pin {
+        Ok(ref mut pin) => pin.make_output().ok(),
+        Err(_) => None,
+    };
+    if heartbeat.is_none() {
+        let _ = writeln!(
+            console,
+            "kit_buttons: no LED on GP{HEARTBEAT_LED}, watch the console instead"
+        );
+    }
+
     share::scope(|subscribe| {
         if Gpio::register_listener(&listener, subscribe).is_err() {
             let _ = writeln!(Console::writer(), "kit_buttons: could not subscribe");
             return;
         }
         loop {
-            TockSyscalls::yield_wait();
+            if let Some(led) = heartbeat.as_mut() {
+                let _ = led.toggle();
+            }
+            // Sleeping rather than `yield_wait` keeps the blink going, and an
+            // alarm yields the same way, so button upcalls still arrive.
+            if Alarm::sleep_for(Milliseconds(250)).is_err() {
+                TockSyscalls::yield_wait();
+            }
         }
     });
 }
