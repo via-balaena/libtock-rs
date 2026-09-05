@@ -20,7 +20,7 @@ use core::task::{Context, Poll};
 
 use libtock::alarm::{Alarm, Milliseconds};
 use libtock::console::Console;
-use libtock::futures::block_on;
+use libtock::futures::{block_on, select, Either};
 use libtock::runtime::{set_main, stack_size, TockSyscalls};
 
 set_main! {main}
@@ -123,6 +123,76 @@ fn main() {
         // Reaching here at all means the console survived two cancelled reads:
         // every line above went out over the same driver.
         let _ = writeln!(console, "console alive after two cancelled reads");
+
+        // 4. select with a timeout that wins. The losing read is dropped while
+        //    genuinely outstanding, with the alarm still in flight alongside it
+        //    -- the first time two operations are live at once on hardware.
+        let start = Alarm::get_ticks().unwrap_or(0);
+        match select(
+            Alarm::sleep_for_async(Milliseconds(500)).expect("no alarm driver"),
+            Console::read_async::<16>(),
+        )
+        .await
+        {
+            Either::Left(_) => {
+                let elapsed = Alarm::get_ticks().unwrap_or(0).wrapping_sub(start);
+                let _ = writeln!(console, "select: timeout won after {} ticks", elapsed);
+            }
+            Either::Right(_) => {
+                let _ = writeln!(console, "select: read won (was something typed?)");
+            }
+        }
+
+        // This line going out at all proves the cancelled read left the console
+        // usable. The sleep that follows proves it left the alarm usable too: a
+        // teardown that disturbed either would show up as a wrong number.
+        let start = Alarm::get_ticks().unwrap_or(0);
+        if Alarm::sleep_for_async(Milliseconds(500))
+            .expect("no alarm driver")
+            .await
+            .is_ok()
+        {
+            let elapsed = Alarm::get_ticks().unwrap_or(0).wrapping_sub(start);
+            let _ = writeln!(console, "after select: 500ms -> {} ticks", elapsed);
+        }
+
+        // 5. The other direction: a read that wins, cancelling a five second
+        //    alarm. Needs a byte within five seconds, so this reports which way
+        //    it went rather than assuming.
+        let _ = writeln!(console, "select: send a byte within 5s");
+        match select(
+            Alarm::sleep_for_async(Milliseconds(5000)).expect("no alarm driver"),
+            Console::read_async::<16>(),
+        )
+        .await
+        {
+            Either::Right(Ok(output)) => {
+                let _ = writeln!(
+                    console,
+                    "select: read won with {} bytes, alarm cancelled",
+                    output.count()
+                );
+            }
+            Either::Right(Err(_)) => {
+                let _ = writeln!(console, "select: read won but failed");
+            }
+            Either::Left(_) => {
+                let _ = writeln!(console, "select: timed out, no byte arrived");
+            }
+        }
+
+        // If the losing five second alarm was not stopped, this sleep is the
+        // place it would show: a stale deadline or a leaked upcall both land
+        // far from 500k ticks.
+        let start = Alarm::get_ticks().unwrap_or(0);
+        if Alarm::sleep_for_async(Milliseconds(500))
+            .expect("no alarm driver")
+            .await
+            .is_ok()
+        {
+            let elapsed = Alarm::get_ticks().unwrap_or(0).wrapping_sub(start);
+            let _ = writeln!(console, "after 5s cancel: 500ms -> {} ticks", elapsed);
+        }
 
         let _ = writeln!(console, "async_probe: done");
     });
