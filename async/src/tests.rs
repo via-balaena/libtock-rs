@@ -21,6 +21,15 @@ fn alarm_kernel() -> (fake::Kernel, std::rc::Rc<fake::Alarm>) {
     (kernel, driver)
 }
 
+/// A kernel whose alarm records deadlines instead of firing them, so a test can
+/// see whether an alarm is genuinely outstanding.
+fn deferred_alarm_kernel() -> (fake::Kernel, std::rc::Rc<fake::Alarm>) {
+    let kernel = fake::Kernel::new();
+    let driver = fake::Alarm::new_deferred(1000);
+    kernel.add_driver(&driver);
+    (kernel, driver)
+}
+
 fn subscribe_count(log: &[SyscallLogEntry]) -> usize {
     log.iter()
         .filter(|entry| {
@@ -66,8 +75,8 @@ fn sequential_sleeps_share_one_slot() {
 /// memory the process is about to reuse. This is the property that makes the
 /// future safe to drop inside a `select`.
 #[test]
-fn drop_before_firing_unsubscribes() {
-    let (kernel, _driver) = alarm_kernel();
+fn drop_before_firing_stops_and_unsubscribes() {
+    let (kernel, driver) = deferred_alarm_kernel();
     let _ = kernel.take_syscall_log();
 
     {
@@ -79,12 +88,20 @@ fn drop_before_firing_unsubscribes() {
         // here, and Tock only delivers upcalls inside a yield, so the future
         // cannot have completed.
         assert_eq!(sleep.as_mut().poll(&mut context), Poll::Pending);
+        assert!(driver.is_armed(), "polling should have armed the alarm");
         assert_eq!(
             subscribe_count(&kernel.take_syscall_log()),
             1,
             "polling should have registered exactly one upcall"
         );
     }
+
+    // The assertion this test existed to make and could not: the alarm is
+    // actually disarmed, not merely sent a STOP the fake ignored.
+    assert!(
+        !driver.is_armed(),
+        "dropping an armed Sleep must stop the alarm, not just unsubscribe"
+    );
 
     let log = kernel.take_syscall_log();
 
@@ -202,7 +219,10 @@ fn console_read_resolves() {
 #[test]
 fn console_read_cancelled_unallows_and_aborts() {
     let kernel = fake::Kernel::new();
-    let driver = fake::Console::new_with_input(b"hello");
+    // Deferred, so the read is genuinely in flight when the future is dropped.
+    // The default console answers a read before READ returns, which would leave
+    // nothing for the abort to cancel.
+    let driver = fake::Console::new_deferred();
     kernel.add_driver(&driver);
     let _ = kernel.take_syscall_log();
 
@@ -214,6 +234,10 @@ fn console_read_cancelled_unallows_and_aborts() {
         // Registers the buffer and starts the receive. No yield, so no upcall
         // can have been delivered yet.
         assert!(read.as_mut().poll(&mut context).is_pending());
+        assert!(
+            driver.is_receiving(),
+            "polling should have started a receive"
+        );
 
         let log = kernel.take_syscall_log();
         assert!(
@@ -254,6 +278,12 @@ fn console_read_cancelled_unallows_and_aborts() {
         )),
         "dropping a started Read must also abort the receive"
     );
+    // The assertion the ABORT check could not make until the fake modelled an
+    // outstanding receive: the driver is no longer mid-read.
+    assert!(
+        !driver.is_receiving(),
+        "dropping a started Read must end the receive, not just send an abort"
+    );
 }
 
 /// A read with no console driver present must resolve to an error, not sit in
@@ -267,4 +297,88 @@ fn console_read_without_driver_errors() {
         crate::block_on::<fake::Syscalls, _>(TestConsole::read_async::<16>()).is_err(),
         "a missing driver must surface as an error from the first poll"
     );
+}
+
+// -----------------------------------------------------------------------------
+// Concurrency
+// -----------------------------------------------------------------------------
+
+/// Both drivers on one kernel, so two operations can be outstanding at once.
+fn alarm_and_console(
+    console: std::rc::Rc<fake::Console>,
+) -> (fake::Kernel, std::rc::Rc<fake::Alarm>) {
+    let kernel = fake::Kernel::new();
+    let alarm = fake::Alarm::new(1000);
+    kernel.add_driver(&alarm);
+    kernel.add_driver(&console);
+    (kernel, alarm)
+}
+
+#[test]
+fn join_runs_an_alarm_and_a_console_read() {
+    let console = fake::Console::new_with_input(b"hi");
+    let (_kernel, _alarm) = alarm_and_console(console);
+
+    let (slept, read) = crate::block_on::<fake::Syscalls, _>(crate::join(
+        TestAlarm::sleep_for_async(Milliseconds(10)).expect("frequency lookup failed"),
+        TestConsole::read_async::<16>(),
+    ));
+
+    assert_eq!(slept, Ok(()));
+    assert_eq!(read.expect("read failed").bytes(), b"hi");
+}
+
+/// The demonstration the whole design exists for: race a timeout against a read
+/// that never arrives, and have the loser torn down correctly.
+///
+/// The console is deferred, so its read stays in flight and the alarm always
+/// wins. Dropping the losing `Read` must unallow its buffer, unsubscribe, and
+/// abort the receive -- and now that `fake::Console` models an outstanding
+/// receive, the last of those is observable rather than inferred.
+#[test]
+fn select_cancels_the_loser() {
+    let console = fake::Console::new_deferred();
+    let (kernel, _alarm) = alarm_and_console(console.clone());
+    let _ = kernel.take_syscall_log();
+
+    let outcome = crate::block_on::<fake::Syscalls, _>(crate::select(
+        TestAlarm::sleep_for_async(Milliseconds(10)).expect("frequency lookup failed"),
+        TestConsole::read_async::<16>(),
+    ));
+
+    assert!(
+        matches!(outcome, crate::Either::Left(Ok(()))),
+        "the alarm should win"
+    );
+    assert!(
+        !console.is_receiving(),
+        "the losing read must have been aborted, not left in flight"
+    );
+
+    let log = kernel.take_syscall_log();
+    assert!(
+        log.iter().any(|entry| matches!(
+            entry,
+            SyscallLogEntry::AllowRw {
+                driver_num: CONSOLE_DRIVER_NUM,
+                buffer_num: CONSOLE_ALLOW_READ,
+                len: 0,
+            }
+        )),
+        "the losing read must have handed its buffer back"
+    );
+}
+
+/// `select` polls its left side first, so a race both sides win resolves Left.
+#[test]
+fn select_prefers_the_left_side() {
+    let console = fake::Console::new_with_input(b"hi");
+    let (_kernel, _alarm) = alarm_and_console(console);
+
+    let outcome = crate::block_on::<fake::Syscalls, _>(crate::select(
+        TestAlarm::sleep_for_async(Milliseconds(10)).expect("frequency lookup failed"),
+        TestConsole::read_async::<16>(),
+    ));
+
+    assert!(matches!(outcome, crate::Either::Left(Ok(()))));
 }

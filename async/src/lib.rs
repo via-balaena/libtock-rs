@@ -15,7 +15,7 @@
 // `libtock_platform::async_call`, audited once. Lock that in.
 #![forbid(unsafe_code)]
 
-use core::future::Future;
+use core::future::{poll_fn, Future};
 use core::pin::pin;
 use core::task::{Context, Poll, Waker};
 use libtock_platform::Syscalls;
@@ -45,6 +45,85 @@ pub fn block_on<S: Syscalls, F: Future>(future: F) -> F::Output {
         }
         S::yield_wait();
     }
+}
+
+/// Runs two futures concurrently and returns both results.
+///
+/// Concurrency here is cooperative and single-threaded, as everything in a Tock
+/// process is: each poll drives whichever future is ready, and the process parks
+/// in `yield_wait` when neither is.
+///
+/// Both futures must be driving *different* drivers. Tock gives a process one
+/// upcall slot per (driver, subscribe number), so joining two operations that
+/// share a slot would have the second silently displace the first's
+/// registration. Joining an alarm with a console read is fine; joining two
+/// alarms is not.
+///
+/// Written with `poll_fn` over locals pinned in this function's own frame, which
+/// is what keeps the crate free of `unsafe`: a hand-written `Join` future would
+/// need pin projection to reach its fields.
+pub async fn join<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
+    let mut a = pin!(a);
+    let mut b = pin!(b);
+    let mut a_done: Option<A::Output> = None;
+    let mut b_done: Option<B::Output> = None;
+
+    poll_fn(move |context| {
+        if a_done.is_none() {
+            if let Poll::Ready(output) = a.as_mut().poll(context) {
+                a_done = Some(output);
+            }
+        }
+        if b_done.is_none() {
+            if let Poll::Ready(output) = b.as_mut().poll(context) {
+                b_done = Some(output);
+            }
+        }
+
+        match (a_done.take(), b_done.take()) {
+            (Some(first), Some(second)) => Poll::Ready((first, second)),
+            (first, second) => {
+                a_done = first;
+                b_done = second;
+                Poll::Pending
+            }
+        }
+    })
+    .await
+}
+
+/// Which side of a [`select`] finished first.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Either<A, B> {
+    Left(A),
+    Right(B),
+}
+
+/// Runs two futures concurrently and returns the first result, cancelling the
+/// other.
+///
+/// The loser is dropped when this function returns, which is what makes
+/// cancellation load-bearing rather than theoretical: a dropped driver future
+/// unallows its buffer, unsubscribes, and tells the driver to abort. `select` is
+/// the reason all of that has to be correct.
+///
+/// The same one-slot-per-(driver, subscribe number) rule as [`join`] applies.
+///
+/// `a` is polled first, so if both are ready in the same pass, `Left` wins.
+pub async fn select<A: Future, B: Future>(a: A, b: B) -> Either<A::Output, B::Output> {
+    let mut a = pin!(a);
+    let mut b = pin!(b);
+
+    poll_fn(move |context| {
+        if let Poll::Ready(output) = a.as_mut().poll(context) {
+            return Poll::Ready(Either::Left(output));
+        }
+        if let Poll::Ready(output) = b.as_mut().poll(context) {
+            return Poll::Ready(Either::Right(output));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 #[cfg(test)]

@@ -143,6 +143,17 @@ pub struct ReadOutput<const N: usize> {
 }
 
 #[cfg(feature = "async")]
+impl<const N: usize> core::fmt::Debug for ReadOutput<N> {
+    /// Shows the bytes received, not the whole backing array: everything past
+    /// `count` is uninitialised as far as the caller is concerned.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ReadOutput")
+            .field("bytes", &self.bytes())
+            .finish()
+    }
+}
+
+#[cfg(feature = "async")]
 impl<const N: usize> ReadOutput<N> {
     /// The bytes the kernel wrote, which may be shorter than `N`.
     pub fn bytes(&self) -> &[u8] {
