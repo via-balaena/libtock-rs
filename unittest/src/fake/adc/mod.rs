@@ -60,8 +60,16 @@ impl Adc {
 
     pub fn set_value(&self, value: i32) {
         if self.busy.get() {
+            // The capsule's argument order, which is not the obvious one:
+            // `(AdcMode as usize, channel, sample)`. This fake used to put the
+            // sample first, which is where libtock_adc used to look for it, so
+            // the two agreed with each other and disagreed with the kernel --
+            // every real conversion read back as `AdcMode::SingleSample`, which
+            // is zero.
+            const SINGLE_SAMPLE: u32 = 0;
+            let channel = self.last_channel.get().unwrap_or(0);
             self.share_ref
-                .schedule_upcall(0, (value as u32, 0, 0))
+                .schedule_upcall(0, (SINGLE_SAMPLE, channel, value as u32))
                 .expect("Unable to schedule upcall");
             self.busy.set(false);
         }

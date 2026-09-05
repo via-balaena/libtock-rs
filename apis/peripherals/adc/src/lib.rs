@@ -89,8 +89,17 @@ impl<S: Syscalls> Adc<S> {
 pub struct ADCListener<F: Fn(u16)>(pub F);
 
 impl<F: Fn(u16)> Upcall<OneId<DRIVER_NUM, 0>> for ADCListener<F> {
-    fn upcall(&self, adc_val: u32, _arg1: u32, _arg2: u32) {
-        self.0(adc_val as u16)
+    /// The sample is the **third** argument. `capsules/core/src/adc.rs`
+    /// schedules `(AdcMode as usize, channel, sample as usize)`, and
+    /// `AdcMode::SingleSample` is 0 — so reading the first argument, as this
+    /// did, returned a literal constant zero for every conversion on every
+    /// channel. It looked exactly like an ADC that was not converting.
+    ///
+    /// The second argument is the channel the sample came from. Not surfaced
+    /// here because the capsule serialises a process's conversions, so it can
+    /// only ever be the channel that was asked for.
+    fn upcall(&self, _mode: u32, _channel: u32, sample: u32) {
+        self.0(sample as u16)
     }
 }
 

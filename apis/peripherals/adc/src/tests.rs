@@ -125,3 +125,26 @@ fn count_without_a_driver_is_an_error() {
     let _kernel = fake::Kernel::new();
     assert_eq!(Adc::count(), Err(ErrorCode::NoDevice));
 }
+
+/// The bug this ordering exists to prevent. The capsule schedules
+/// `(AdcMode as usize, channel, sample)` and `AdcMode::SingleSample` is zero,
+/// so a driver reading the first argument gets a constant zero from every
+/// conversion — indistinguishable from an ADC that is not converting, which is
+/// how it presented on hardware.
+///
+/// The fake used to schedule the sample first, which is where the driver used
+/// to look, so both were wrong together and every test passed.
+#[test]
+fn the_sample_is_the_third_upcall_argument() {
+    let kernel = fake::Kernel::new();
+    let driver = fake::Adc::new_with_channels(2);
+    kernel.add_driver(&driver);
+
+    driver.set_value_sync_on(1, 4095);
+
+    assert_eq!(
+        Adc::read_single_sample_sync(1),
+        Ok(4095),
+        "a sample must survive the trip, not be replaced by the mode"
+    );
+}

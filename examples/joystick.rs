@@ -30,6 +30,21 @@
 //! Read 12, compute a full scale of `(1 << bits) - 1`, and every reading looks
 //! pinned at maximum: wrong by a factor of sixteen, and entirely plausible.
 //! Work in 16 bits.
+//!
+//! # What it did on hardware, 2026-09-05
+//!
+//! ```text
+//! resting      ch0=32638  ch1=31906
+//! full travel  ch0 0..65408   ch1 0..65520
+//! ```
+//!
+//! Three things confirmed by those numbers. The rest position sits at
+//! mid-scale, where a centred stick belongs. The travel reaches **both rails**,
+//! which is the check that matters: RP2350 pads come out of reset with the
+//! pull-down enabled, and across a potentiometer that is the lower leg of a
+//! divider, so the symptom is a plausible range that never reaches either end.
+//! And every raw reading is a multiple of sixteen -- 65408, 31888, 53552 --
+//! which is `raw << 4` and settles the scaling above by measurement.
 
 #![no_main]
 #![no_std]
@@ -39,6 +54,7 @@ use core::fmt::Write;
 use libtock::adc::Adc;
 use libtock::alarm::{Alarm, Milliseconds};
 use libtock::console::Console;
+use libtock::gpio::Gpio;
 use libtock::runtime::{set_main, stack_size};
 
 set_main! {main}
@@ -51,6 +67,10 @@ const Y: u32 = 1;
 
 /// Samples averaged at startup to find the rest position.
 const CALIBRATION_SAMPLES: u32 = 8;
+
+/// One of the kit's discrete LEDs, used as a hold-still cue. GP17 is the SPI
+/// capsule's chip select on the bench kernel, so GP16 is the free one.
+const HOLD_STILL_LED: u32 = 16;
 
 /// How far from centre counts as a deliberate push, as a fraction of the whole
 /// 16-bit range. Generous, because a stick at rest wanders by a few hundred.
@@ -82,6 +102,27 @@ fn main() {
         "joystick: {channels} channels, {bits} bits, {reference} mV reference"
     );
 
+    // The rest position is measured, so the stick has to be still while it is
+    // measured, and somebody at the board needs to know when that is. The
+    // console cannot tell them -- it is captured and read afterwards -- so the
+    // kit's LED says it: lit means hold still, dark means go. Without a cue
+    // the honest answer to "when should I not touch it" is "you cannot tell",
+    // which is not a thing to leave in an instrument.
+    let mut led_pin = Gpio::get_pin(HOLD_STILL_LED);
+    let mut led = match led_pin {
+        Ok(ref mut pin) => pin.make_output().ok(),
+        Err(_) => None,
+    };
+    if let Some(led) = led.as_mut() {
+        let _ = led.set();
+    }
+    let _ = writeln!(
+        console,
+        "joystick: LED ON -- hold the stick still while the centre is measured"
+    );
+    // Long enough to notice the LED before the measuring starts.
+    let _ = Alarm::sleep_for(Milliseconds(1500));
+
     let (centre_x, centre_y) = match (calibrate(X), calibrate(Y)) {
         (Some(x), Some(y)) => (x, y),
         _ => {
@@ -89,9 +130,13 @@ fn main() {
             return;
         }
     };
+
+    if let Some(led) = led.as_mut() {
+        let _ = led.clear();
+    }
     let _ = writeln!(
         console,
-        "joystick: resting at ch{X}={centre_x} ch{Y}={centre_y}; move the stick"
+        "joystick: LED OFF -- resting at ch{X}={centre_x} ch{Y}={centre_y}, move the stick"
     );
 
     // The travel, accumulated as the stick is moved. Starts at the rest
