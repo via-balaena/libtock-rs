@@ -36,6 +36,24 @@
 //! Anything else is an answer, and the table below names the ones worth
 //! knowing. An unrecognised non-zero reply is still a result: it means the wires
 //! are right and the panel is something else.
+//!
+//! # What this established on the kit's panel: nothing answers, and why
+//!
+//! `ff` on every byte, every command, every rate, with the panel initialised
+//! and demonstrably taking commands -- `kit_display_bars` draws with this exact
+//! sequence. Three things together make that conclusive rather than a shrug:
+//!
+//! 1. `kit_probe` finds GP4 refusing an internal pull-down, so the net is held
+//!    high by something and this is not an unconnected pin.
+//! 2. The panel is awake: the same init draws a picture.
+//! 3. A wrong dummy-clock count would produce *shifted* data, which contains
+//!    zeros. A line that never goes low across five commands and four rates is
+//!    not badly framed data.
+//!
+//! So the controller does not drive MISO, and this panel cannot be identified
+//! over this bus. That is a result and not a failure: it means an honest driver
+//! for it must not assert a part number, because no measurement available here
+//! can support one.
 
 #![no_main]
 #![no_std]
@@ -131,6 +149,17 @@ fn main() {
     let _ = dc.set();
     reset(&mut rst);
 
+    // Initialise before asking. The first version of this read straight after
+    // reset and got `ff` at every rate, which was taken for an unconnected
+    // MISO -- but `kit_probe` then found GP4 refusing an internal pull-down,
+    // so something is on that net. A controller left asleep is under no
+    // obligation to answer a read, and this never woke it. The sequence is the
+    // one `kit_display_bars` proved on this panel.
+    if init(&mut cs, &mut dc).is_err() {
+        let _ = writeln!(console, "kit_display_id: init failed\r");
+        return;
+    }
+
     for rate in RATES {
         if rate < MINIMUM_RATE_HZ {
             let _ = writeln!(
@@ -191,6 +220,20 @@ fn main() {
     );
 }
 
+/// The init proved on this panel by `kit_display_bars`.
+fn init(cs: &mut Out<'_>, dc: &mut Out<'_>) -> Result<(), libtock_platform::ErrorCode> {
+    command(cs, dc, 0x01, &[])?; // SWRESET
+    let _ = Alarm::sleep_for(Milliseconds(150));
+    command(cs, dc, 0x11, &[])?; // SLPOUT
+    let _ = Alarm::sleep_for(Milliseconds(150));
+    command(cs, dc, 0x3a, &[0x55])?; // COLMOD, 16bpp
+    command(cs, dc, 0x36, &[0x28])?; // MADCTL, MV | BGR
+    command(cs, dc, 0x21, &[])?; // INVON
+    command(cs, dc, 0x29, &[])?; // DISPON
+    let _ = Alarm::sleep_for(Milliseconds(50));
+    Ok(())
+}
+
 /// Pulses reset, then waits out the controller's start-up.
 fn reset(rst: &mut Out<'_>) {
     let _ = rst.set();
@@ -207,7 +250,7 @@ fn reset(rst: &mut Out<'_>) {
 fn read_register(
     cs: &mut Out<'_>,
     dc: &mut Out<'_>,
-    command: u8,
+    code: u8,
     out: &mut [u8],
 ) -> Result<(), libtock_platform::ErrorCode> {
     let zeros = [0u8; 8];
@@ -215,12 +258,30 @@ fn read_register(
 
     let _ = cs.clear();
     let _ = dc.clear();
-    let sent = SpiController::spi_controller_write_sync(&[command], 1);
+    let sent = SpiController::spi_controller_write_sync(&[code], 1);
     let _ = dc.set();
     let read = SpiController::spi_controller_write_read_sync(&zeros, out, length as u32);
     let _ = cs.set();
 
     sent.and(read)
+}
+
+/// One command byte with DC low, then its parameters with DC high.
+fn command(
+    cs: &mut Out<'_>,
+    dc: &mut Out<'_>,
+    code: u8,
+    args: &[u8],
+) -> Result<(), libtock_platform::ErrorCode> {
+    let _ = cs.clear();
+    let _ = dc.clear();
+    let sent = SpiController::spi_controller_write_sync(&[code], 1);
+    if !args.is_empty() {
+        let _ = dc.set();
+        let _ = SpiController::spi_controller_write_sync(args, args.len() as u32);
+    }
+    let _ = cs.set();
+    sent
 }
 
 /// Names a reply that matches a controller worth recognising. The first byte of
