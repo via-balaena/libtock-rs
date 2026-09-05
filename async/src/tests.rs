@@ -21,6 +21,15 @@ fn alarm_kernel() -> (fake::Kernel, std::rc::Rc<fake::Alarm>) {
     (kernel, driver)
 }
 
+/// A kernel whose alarm records deadlines instead of firing them, so a test can
+/// see whether an alarm is genuinely outstanding.
+fn deferred_alarm_kernel() -> (fake::Kernel, std::rc::Rc<fake::Alarm>) {
+    let kernel = fake::Kernel::new();
+    let driver = fake::Alarm::new_deferred(1000);
+    kernel.add_driver(&driver);
+    (kernel, driver)
+}
+
 fn subscribe_count(log: &[SyscallLogEntry]) -> usize {
     log.iter()
         .filter(|entry| {
@@ -66,8 +75,8 @@ fn sequential_sleeps_share_one_slot() {
 /// memory the process is about to reuse. This is the property that makes the
 /// future safe to drop inside a `select`.
 #[test]
-fn drop_before_firing_unsubscribes() {
-    let (kernel, _driver) = alarm_kernel();
+fn drop_before_firing_stops_and_unsubscribes() {
+    let (kernel, driver) = deferred_alarm_kernel();
     let _ = kernel.take_syscall_log();
 
     {
@@ -79,12 +88,20 @@ fn drop_before_firing_unsubscribes() {
         // here, and Tock only delivers upcalls inside a yield, so the future
         // cannot have completed.
         assert_eq!(sleep.as_mut().poll(&mut context), Poll::Pending);
+        assert!(driver.is_armed(), "polling should have armed the alarm");
         assert_eq!(
             subscribe_count(&kernel.take_syscall_log()),
             1,
             "polling should have registered exactly one upcall"
         );
     }
+
+    // The assertion this test existed to make and could not: the alarm is
+    // actually disarmed, not merely sent a STOP the fake ignored.
+    assert!(
+        !driver.is_armed(),
+        "dropping an armed Sleep must stop the alarm, not just unsubscribe"
+    );
 
     let log = kernel.take_syscall_log();
 
