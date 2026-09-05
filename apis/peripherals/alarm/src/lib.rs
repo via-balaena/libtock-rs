@@ -197,7 +197,14 @@ impl<S: Syscalls, C: platform::subscribe::Config> core::future::Future for Sleep
             this.started = true;
         }
 
-        this.shared.waker.set(Some(context.waker().clone()));
+        // Only clone when the executor handed us a waker that would not wake the
+        // same task. `Cell` has no way to inspect in place, hence the take/put
+        // round trip.
+        let stored = this.shared.waker.take();
+        this.shared.waker.set(match stored {
+            Some(waker) if waker.will_wake(context.waker()) => Some(waker),
+            _ => Some(context.waker().clone()),
+        });
 
         // Tock delivers upcalls only inside Yield, so one cannot land between
         // the check at the top and this store. Re-check anyway: it costs a load
@@ -207,6 +214,24 @@ impl<S: Syscalls, C: platform::subscribe::Config> core::future::Future for Sleep
         }
 
         Poll::Pending
+    }
+}
+
+#[cfg(feature = "async")]
+impl<S: Syscalls, C: platform::subscribe::Config> Drop for Sleep<S, C> {
+    /// Cancels the alarm still pending in the kernel.
+    ///
+    /// Unsubscribing alone would leave the alarm capsule holding a virtual
+    /// alarm for this process that expires into a null upcall. This body runs
+    /// before the fields drop, so the alarm is stopped before `Subscribe::drop`
+    /// unsubscribes.
+    fn drop(&mut self) {
+        if self.started && !self.shared.fired.get() {
+            // There is nothing useful to do with a failure here: the operation
+            // is already being torn down, and a stop that does not land only
+            // wastes kernel state.
+            let _ = S::command(DRIVER_NUM, command::STOP, 0, 0);
+        }
     }
 }
 

@@ -10,6 +10,7 @@ type TestAlarm = Alarm<fake::Syscalls>;
 
 const DRIVER_NUM: u32 = 0;
 const CALLBACK: u32 = 0;
+const STOP: u32 = 3;
 const SET_RELATIVE: u32 = 5;
 
 /// The kernel and driver both have to outlive the test body, so hand both back.
@@ -85,10 +86,24 @@ fn drop_before_firing_unsubscribes() {
         );
     }
 
+    let log = kernel.take_syscall_log();
+
     assert_eq!(
-        subscribe_count(&kernel.take_syscall_log()),
+        subscribe_count(&log),
         1,
         "dropping an armed Sleep must unsubscribe"
+    );
+    assert!(
+        log.iter().any(|entry| matches!(
+            entry,
+            SyscallLogEntry::Command {
+                driver_id: DRIVER_NUM,
+                command_id: STOP,
+                ..
+            }
+        )),
+        "dropping an armed Sleep must also stop the alarm, or the capsule keeps \
+         a virtual alarm set for a callback that no longer exists"
     );
 }
 
@@ -122,5 +137,31 @@ fn drop_before_polling_does_not_arm_alarm() {
         subscribe_count(&log),
         1,
         "drop issues one no-op unsubscribe even though nothing was registered"
+    );
+}
+
+/// A `Sleep` that already fired must not send a redundant stop on drop.
+#[test]
+fn completed_sleep_does_not_stop() {
+    let (kernel, _driver) = alarm_kernel();
+    let _ = kernel.take_syscall_log();
+
+    assert_eq!(
+        crate::block_on::<fake::Syscalls, _>(
+            TestAlarm::sleep_for_async(Ticks(1)).expect("frequency lookup failed")
+        ),
+        Ok(())
+    );
+
+    assert!(
+        !kernel.take_syscall_log().iter().any(|entry| matches!(
+            entry,
+            SyscallLogEntry::Command {
+                driver_id: DRIVER_NUM,
+                command_id: STOP,
+                ..
+            }
+        )),
+        "a Sleep that fired has no alarm left to stop"
     );
 }
