@@ -298,3 +298,87 @@ fn console_read_without_driver_errors() {
         "a missing driver must surface as an error from the first poll"
     );
 }
+
+// -----------------------------------------------------------------------------
+// Concurrency
+// -----------------------------------------------------------------------------
+
+/// Both drivers on one kernel, so two operations can be outstanding at once.
+fn alarm_and_console(
+    console: std::rc::Rc<fake::Console>,
+) -> (fake::Kernel, std::rc::Rc<fake::Alarm>) {
+    let kernel = fake::Kernel::new();
+    let alarm = fake::Alarm::new(1000);
+    kernel.add_driver(&alarm);
+    kernel.add_driver(&console);
+    (kernel, alarm)
+}
+
+#[test]
+fn join_runs_an_alarm_and_a_console_read() {
+    let console = fake::Console::new_with_input(b"hi");
+    let (_kernel, _alarm) = alarm_and_console(console);
+
+    let (slept, read) = crate::block_on::<fake::Syscalls, _>(crate::join(
+        TestAlarm::sleep_for_async(Milliseconds(10)).expect("frequency lookup failed"),
+        TestConsole::read_async::<16>(),
+    ));
+
+    assert_eq!(slept, Ok(()));
+    assert_eq!(read.expect("read failed").bytes(), b"hi");
+}
+
+/// The demonstration the whole design exists for: race a timeout against a read
+/// that never arrives, and have the loser torn down correctly.
+///
+/// The console is deferred, so its read stays in flight and the alarm always
+/// wins. Dropping the losing `Read` must unallow its buffer, unsubscribe, and
+/// abort the receive -- and now that `fake::Console` models an outstanding
+/// receive, the last of those is observable rather than inferred.
+#[test]
+fn select_cancels_the_loser() {
+    let console = fake::Console::new_deferred();
+    let (kernel, _alarm) = alarm_and_console(console.clone());
+    let _ = kernel.take_syscall_log();
+
+    let outcome = crate::block_on::<fake::Syscalls, _>(crate::select(
+        TestAlarm::sleep_for_async(Milliseconds(10)).expect("frequency lookup failed"),
+        TestConsole::read_async::<16>(),
+    ));
+
+    assert!(
+        matches!(outcome, crate::Either::Left(Ok(()))),
+        "the alarm should win"
+    );
+    assert!(
+        !console.is_receiving(),
+        "the losing read must have been aborted, not left in flight"
+    );
+
+    let log = kernel.take_syscall_log();
+    assert!(
+        log.iter().any(|entry| matches!(
+            entry,
+            SyscallLogEntry::AllowRw {
+                driver_num: CONSOLE_DRIVER_NUM,
+                buffer_num: CONSOLE_ALLOW_READ,
+                len: 0,
+            }
+        )),
+        "the losing read must have handed its buffer back"
+    );
+}
+
+/// `select` polls its left side first, so a race both sides win resolves Left.
+#[test]
+fn select_prefers_the_left_side() {
+    let console = fake::Console::new_with_input(b"hi");
+    let (_kernel, _alarm) = alarm_and_console(console);
+
+    let outcome = crate::block_on::<fake::Syscalls, _>(crate::select(
+        TestAlarm::sleep_for_async(Milliseconds(10)).expect("frequency lookup failed"),
+        TestConsole::read_async::<16>(),
+    ));
+
+    assert!(matches!(outcome, crate::Either::Left(Ok(()))));
+}
