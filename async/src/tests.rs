@@ -382,3 +382,36 @@ fn select_prefers_the_left_side() {
 
     assert!(matches!(outcome, crate::Either::Left(Ok(()))));
 }
+
+/// `select` drops its loser, which is right for a `Read` or a `Sleep` and wrong
+/// for any driver whose cancellation throws away a result -- a stepper's
+/// partial step count, say, which for an open-loop motor is the position.
+///
+/// Lending the future instead of giving it away is the way out. `Pin<&mut F>`
+/// is itself a `Future`, so the loser `select` drops is the borrow; the
+/// operation stays outstanding, and awaiting it afterwards still works.
+#[test]
+fn a_lent_loser_survives_the_select() {
+    let console = fake::Console::new_deferred();
+    let (_kernel, _alarm) = alarm_and_console(console.clone());
+
+    let mut read = pin!(TestConsole::read_async::<16>());
+
+    let outcome = crate::block_on::<fake::Syscalls, _>(crate::select(
+        TestAlarm::sleep_for_async(Milliseconds(10)).expect("frequency lookup failed"),
+        read.as_mut(),
+    ));
+
+    assert!(
+        matches!(outcome, crate::Either::Left(Ok(()))),
+        "the alarm should win"
+    );
+    assert!(
+        console.is_receiving(),
+        "a lent loser must still be in flight -- select dropped the borrow, not the read"
+    );
+
+    console.fire_read(b"late");
+    let output = crate::block_on::<fake::Syscalls, _>(read).expect("read failed");
+    assert_eq!(output.bytes(), b"late");
+}
