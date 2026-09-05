@@ -46,6 +46,15 @@ impl<S: Syscalls, C: platform::subscribe::Config> Stepper<S, C> {
     /// Steps forward, blocking until the movement finishes. Returns the number
     /// of steps actually taken, which is fewer than requested if the movement
     /// was stopped.
+    ///
+    /// A step is one phase advance. The capsule half-steps, so a 28BYJ-48 takes
+    /// 4096 of these per output revolution rather than 2048 — full steps are two
+    /// of them. The finer unit is the primitive so that callers who want it are
+    /// not locked out.
+    ///
+    /// Returns `Busy` if a movement is already running, including one this
+    /// process started. Call [`Stepper::stop`] first to redirect: it reports the
+    /// partial count, so nothing is lost by stopping before changing course.
     pub fn step_forward(steps: u32, interval: Interval) -> Result<u32, ErrorCode> {
         Self::run(command::STEP_FORWARD, steps, interval)
     }
@@ -57,8 +66,15 @@ impl<S: Syscalls, C: platform::subscribe::Config> Stepper<S, C> {
 
     /// Stops a movement and de-energises the coils.
     ///
-    /// Only useful from a second process or an upcall, since `step_forward` and
-    /// `step_reverse` do not return until the movement ends.
+    /// The stopped movement still reports: its completion upcall carries the
+    /// partial step count, which for an open-loop motor is the only record of
+    /// where it ended up. So a `step_forward` blocked in its yield loop returns
+    /// `Ok(partial)` rather than hanging or losing the position.
+    ///
+    /// That also means the owner cannot reach this from a blocking call — it is
+    /// inside `step_forward` for the whole movement. Reachable from an upcall
+    /// handler, or from a future's cancellation path once there is an async
+    /// driver.
     pub fn stop() -> Result<(), ErrorCode> {
         S::command(DRIVER_NUM, command::STOP, 0, 0).to_result()
     }
