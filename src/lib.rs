@@ -73,6 +73,10 @@ pub mod gpio {
         Error, GpioInterruptListener, GpioState, InputPin, OutputPin, PinInterruptEdge, Pull,
         PullDown, PullNone, PullUp,
     };
+
+    /// The future returned by `InputPin::next_edge`.
+    #[cfg(feature = "async")]
+    pub type Edge = gpio::Edge<super::runtime::TockSyscalls>;
 }
 pub mod i2c_master {
     use libtock_i2c_master as i2c_master;

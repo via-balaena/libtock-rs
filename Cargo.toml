@@ -28,6 +28,7 @@ async = [
     "libtock_async",
     "libtock_alarm/async",
     "libtock_console/async",
+    "libtock_gpio/async",
 ]
 
 [dependencies]
@@ -70,6 +71,7 @@ required-features = ["async"]
 [[example]]
 name = "async_probe"
 required-features = ["async"]
+
 
 [build-dependencies]
 libtock_build_scripts = { path = "build_scripts" }
