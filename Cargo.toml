@@ -73,6 +73,9 @@ required-features = ["async"]
 name = "async_probe"
 required-features = ["async"]
 
+[[example]]
+name = "stepper_until_press"
+required-features = ["async"]
 
 [build-dependencies]
 libtock_build_scripts = { path = "build_scripts" }
