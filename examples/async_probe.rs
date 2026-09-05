@@ -111,18 +111,24 @@ fn main() {
         //    `sleep_for_async` it hands back the future rather than a Result.
         for round in 1..=2 {
             let mut read = pin!(Console::read_async::<32>());
-            let armed = ArmOnce(read.as_mut()).await;
+            let parked = ArmOnce(read.as_mut()).await;
+            // This says the first poll returned Pending, which is weaker than it
+            // looks: upcalls are delivered only inside a yield, and there is no
+            // yield between the READ command and this check. A read the driver
+            // has already rejected still parks here, with the rejection queued.
+            // On a board whose process console holds the receive, every read is
+            // rejected with BUSY and this still prints "parked".
             let _ = writeln!(
                 console,
-                "read {} armed: {}",
+                "read {} parked on first poll: {}",
                 round,
-                if armed { "yes" } else { "REFUSED" }
+                if parked { "yes" } else { "no" }
             );
         }
 
         // Reaching here at all means the console survived two cancelled reads:
         // every line above went out over the same driver.
-        let _ = writeln!(console, "console alive after two cancelled reads");
+        let _ = writeln!(console, "console still writable after two cancelled reads");
 
         // 4. select with a timeout that wins. The losing read is dropped while
         //    genuinely outstanding, with the alarm still in flight alongside it
@@ -138,8 +144,16 @@ fn main() {
                 let elapsed = Alarm::get_ticks().unwrap_or(0).wrapping_sub(start);
                 let _ = writeln!(console, "select: timeout won after {} ticks", elapsed);
             }
-            Either::Right(_) => {
-                let _ = writeln!(console, "select: read won (was something typed?)");
+            Either::Right(Ok(output)) => {
+                let _ = writeln!(
+                    console,
+                    "select: read won with {} bytes: {:?}",
+                    output.count(),
+                    output.bytes()
+                );
+            }
+            Either::Right(Err(e)) => {
+                let _ = writeln!(console, "select: read won but failed: {:?}", e);
             }
         }
 
