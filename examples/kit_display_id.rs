@@ -67,8 +67,22 @@ const REGISTERS: [(u8, &str, usize); 5] = [
     (0xdb, "RDID2   version", 2),
 ];
 
-/// Rates to try, fastest first. Reads are the fragile direction.
-const RATES: [u32; 4] = [8_000_000, 4_000_000, 1_000_000, 500_000];
+/// Rates to try, slowest first.
+///
+/// Upward rather than downward because the bus already starts where a first
+/// read should: `VirtualSpiMasterDevice::new` defaults to 100 kHz, mode 0. An
+/// answer at the bottom is a clean one, and climbing from it attributes any
+/// later silence to speed. Starting fast and descending gets the same
+/// information only if you are lucky about where it stops working.
+const RATES: [u32; 4] = [200_000, 1_000_000, 4_000_000, 8_000_000];
+
+/// The bench requires the bus to stay at or above this, so the sweep never goes
+/// under it and a pass whose divider lands below it is skipped rather than run.
+///
+/// No diagnostic value is lost. Every controller this probe knows about reads
+/// far faster than 100 kHz, so a rate below it could only make a working read
+/// slower, never make a failing one work.
+const MINIMUM_RATE_HZ: u32 = 100_000;
 
 fn main() {
     let mut console = Console::writer();
@@ -116,9 +130,19 @@ fn main() {
             continue;
         }
         // What was asked for and what the divider produced are different
-        // numbers, and the second one is the bus.
+        // numbers, and the second one is the bus. Checked rather than trusted,
+        // because a divider that rounds down could land under the floor from a
+        // request that was above it.
         let actual = SpiController::get_baud_rate().unwrap_or(0);
         let _ = writeln!(console, "\r\n=== asked {rate} Hz, bus at {actual} Hz ===\r");
+
+        if actual < MINIMUM_RATE_HZ {
+            let _ = writeln!(
+                console,
+                "  below the {MINIMUM_RATE_HZ} Hz floor, skipping this pass\r"
+            );
+            continue;
+        }
 
         let mut answered = false;
         for (command, name, length) in REGISTERS {
