@@ -4,6 +4,16 @@
 //! real silicon are the ones the fake kernel can only model:
 //!
 //! 1. An awaited `Sleep` resolves, after roughly the delay asked for.
+//! Caveat for RP2040 and RP2350 boards: the console half cannot be exercised
+//! there today, because of two kernel defects rather than anything in the app.
+//! `handle_deferred_call` in the chip's uart.rs invokes the client callback
+//! before setting `rx_status = Idle`, and `MuxUart::received_buffer` restarts
+//! the underlying read from inside that callback, so the restart always fails
+//! BUSY and the mux tears down every device's receive -- including the process
+//! console's. A read here is accepted and then killed by the kernel's own
+//! restart, so it never stays outstanding. Not a limitation of Tock's design:
+//! the mux multiplexes receives deliberately.
+//!
 //! 2. A `Sleep` dropped while armed does not poison the next one. That is the
 //!    claim that unsubscribing clears the queued upcall (TRD 104) and that
 //!    alarm command 3 disarms. Timing separates the failure modes: a stale
