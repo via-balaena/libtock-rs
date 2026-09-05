@@ -12,6 +12,13 @@
 //! make qemu-example EXAMPLE=console_read_busy
 //! ```
 //!
+//! Use that form. `cargo build --example console_read_busy` does not produce a
+//! `.tbf` at all — the runner does, via elf2tab — so hand-rolling the build and
+//! then pointing QEMU at the `.tbf` path silently runs whatever was there
+//! before, with no error and no clue. A check a reader can unknowingly run
+//! against a stale artifact is a hazard rather than a check, and this one bit
+//! its author.
+//!
 //! Expected on an affected build: `read -> 0 bytes, Err(Busy)`.
 //! If the read instead blocks forever, the teardown did not happen.
 //!
