@@ -125,6 +125,14 @@ EXCLUDE_STD := --exclude libtock_unittest --exclude print_sizes \
 .PHONY: test
 test: examples examples-async
 	cargo test $(EXCLUDE_RUNTIME) --workspace
+# The `async` tests inside a driver crate do not run above. Workspace
+# feature unification enables `async` on the crates `libtock_async`
+# dev-depends on and no others, and `--workspace --features=async` cannot
+# stand in: it drags `libtock_runtime` into a host build, which does not
+# compile. So each such crate gets a pass of its own, or its tests are
+# silently skipped rather than run.
+	cargo test -p libtock_gpio --features async
+	cargo test -p libtock_stepper --features async
 	LIBTOCK_PLATFORM=nrf52 cargo fmt --all -- --check
 	cargo clippy --all-targets $(EXCLUDE_RUNTIME) --workspace
 	LIBTOCK_PLATFORM=nrf52 cargo clippy $(EXCLUDE_STD) \
