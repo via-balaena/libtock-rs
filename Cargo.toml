@@ -47,6 +47,7 @@ libtock_runtime = { path = "runtime" }
 libtock_small_panic = { path = "panic_handlers/small_panic" }
 libtock_sound_pressure = { path = "apis/sensors/sound_pressure" }
 libtock_spi_controller = { path = "apis/peripherals/spi_controller" }
+libtock_stepper = { path = "apis/peripherals/stepper" }
 libtock_temperature = { path = "apis/sensors/temperature" }
 
 embedded-hal = { version = "1.0", optional = true }
@@ -80,6 +81,7 @@ members = [
     "apis/peripherals/i2c_master",
     "apis/peripherals/i2c_master_slave",
     "apis/peripherals/rng",
+    "apis/peripherals/stepper",
     "apis/sensors/air_quality",
     "apis/sensors/ambient_light",
     "apis/sensors/ninedof",
