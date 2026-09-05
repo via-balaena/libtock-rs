@@ -93,6 +93,17 @@ examples: toolchain
 	LIBTOCK_PLATFORM=opentitan cargo build --examples --release \
 		--target=riscv32imc-unknown-none-elf
 
+# Examples behind a non-default feature need their own pass. `cargo build
+# --examples` silently skips any example whose required-features are unmet, so
+# without this nothing in CI would ever compile them and they would rot
+# unnoticed. The featureless pass above stays, so both configurations are built.
+.PHONY: examples-async
+examples-async: toolchain
+	LIBTOCK_PLATFORM=nrf52 cargo build --examples --release --features=async \
+		--target=thumbv7em-none-eabi
+	LIBTOCK_PLATFORM=opentitan cargo build --examples --release --features=async \
+		--target=riscv32imc-unknown-none-elf
+
 # Arguments to pass to cargo to exclude crates that require a Tock runtime.
 # This is largely libtock_runtime and crates that depend on libtock_runtime.
 # Used when we need to build a crate for the host OS, as libtock_runtime only
@@ -112,13 +123,17 @@ EXCLUDE_STD := --exclude libtock_unittest --exclude print_sizes \
                --exclude libtock_build_scripts
 
 .PHONY: test
-test: examples
+test: examples examples-async
 	cargo test $(EXCLUDE_RUNTIME) --workspace
 	LIBTOCK_PLATFORM=nrf52 cargo fmt --all -- --check
 	cargo clippy --all-targets $(EXCLUDE_RUNTIME) --workspace
 	LIBTOCK_PLATFORM=nrf52 cargo clippy $(EXCLUDE_STD) \
 		--target=thumbv7em-none-eabi --workspace
 	LIBTOCK_PLATFORM=hifive1 cargo clippy $(EXCLUDE_STD) \
+		--target=riscv32imac-unknown-none-elf --workspace
+	LIBTOCK_PLATFORM=nrf52 cargo clippy $(EXCLUDE_STD) --features=async \
+		--target=thumbv7em-none-eabi --workspace
+	LIBTOCK_PLATFORM=hifive1 cargo clippy $(EXCLUDE_STD) --features=async \
 		--target=riscv32imac-unknown-none-elf --workspace
 	cd nightly && \
 		MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" \
