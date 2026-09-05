@@ -56,6 +56,15 @@ impl FakeStepper {
     fn is_running(&self) -> bool {
         self.running.get()
     }
+
+    /// Puts the fake in the state a started movement leaves it in.
+    ///
+    /// A test of the blocking `stop` needs this process to own the motor, and
+    /// it cannot get there by calling `step_forward`: against a deferred fake
+    /// that blocks in a yield loop with nothing to deliver.
+    fn start_movement(&self) {
+        self.running.set(true);
+    }
 }
 
 impl fake::SyscallDriver for FakeStepper {
@@ -74,18 +83,21 @@ impl fake::SyscallDriver for FakeStepper {
         match command_id {
             command::EXISTS => libtock_unittest::command_return::success(),
             command::STOP => {
-                // A stop still reports. That is what lets a caller who stops a
-                // movement learn where the motor ended up, and it is the
-                // behaviour the async cancellation path depends on.
-                if self.running.replace(false) {
-                    self.share_ref
-                        .schedule_upcall(
-                            subscribe::COMPLETE,
-                            (self.status.get(), self.taken.get().unwrap_or(0), 0),
-                        )
-                        .expect("schedule_upcall failed");
+                // A stop reports the count twice over, which is the capsule's
+                // behaviour and not belt and braces: the upcall ends the run
+                // for whoever is awaiting it, and the return value reaches a
+                // caller who holds no subscription at all.
+                //
+                // With nothing running there is no owner, and the capsule
+                // answers Reserve rather than succeeding quietly.
+                if !self.running.replace(false) {
+                    return libtock_unittest::command_return::failure(ErrorCode::Reserve);
                 }
-                libtock_unittest::command_return::success()
+                let taken = self.taken.get().unwrap_or(0);
+                self.share_ref
+                    .schedule_upcall(subscribe::COMPLETE, (self.status.get(), taken, 0))
+                    .expect("schedule_upcall failed");
+                libtock_unittest::command_return::success_u32(taken)
             }
             command::STEP_FORWARD | command::STEP_REVERSE => {
                 if self.deferred.get() {
@@ -169,12 +181,30 @@ fn failure_status_propagates() {
     );
 }
 
+/// A stop reports the position it stopped at, so a caller that holds no
+/// subscription can still learn where the motor is.
 #[test]
-fn stop_is_a_bare_command() {
-    let (_kernel, driver) = kernel_with_stepper();
+fn stop_reports_the_step_count() {
+    let kernel = fake::Kernel::new();
+    let driver = FakeStepper::new_deferred();
+    kernel.add_driver(&driver);
+    driver.report_taken(1200);
 
-    assert_eq!(Stepper::stop(), Ok(()));
+    // A movement has to be running for this process to own the motor.
+    driver.start_movement();
+
+    assert_eq!(Stepper::stop(), Ok(1200));
     assert_eq!(driver.last_command.get(), Some((command::STOP, 0, 0)));
+}
+
+/// Stopping a motor that is not running is refused rather than quietly
+/// succeeding: a supervisor intervening on a hung owner has to be able to tell
+/// that nothing stopped.
+#[test]
+fn stop_without_a_movement_is_refused() {
+    let (_kernel, _driver) = kernel_with_stepper();
+
+    assert_eq!(Stepper::stop(), Err(ErrorCode::Reserve));
 }
 
 // -----------------------------------------------------------------------------
@@ -273,13 +303,17 @@ mod step {
         assert_eq!(step.as_mut().poll(&mut context), Poll::Pending);
         assert!(driver.is_running());
 
-        assert_eq!(Stepper::stop(), Ok(()));
+        assert_eq!(
+            Stepper::stop(),
+            Ok(1200),
+            "the stop reports the count to its own caller ..."
+        );
         fake::Syscalls::yield_wait();
 
         assert_eq!(
             step.as_mut().poll(&mut context),
             Poll::Ready(Ok(1200)),
-            "a stopped movement still reports where it got to"
+            "... and the same count to the future awaiting the run"
         );
         assert!(!driver.is_running());
     }

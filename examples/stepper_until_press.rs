@@ -14,7 +14,14 @@
 //! is. So the movement is *lent* to `select` rather than given to it —
 //! `Pin<&mut F>` is itself a `Future`, so what gets dropped is the borrow. The
 //! motor is stopped explicitly, and the same future is then awaited a second
-//! time to collect the partial count the stop reports.
+//! time to collect the count.
+//!
+//! The stop also returns that count directly, so on this driver the lending is
+//! belt as well as braces. It is kept because it is the general answer — it
+//! holds for any operation whose result arrives in an upcall, while the
+//! synchronous return only rescues the ones that also have a stop command that
+//! reports. Having both here is useful in its own right: two independent routes
+//! to the position, and the example says so if they disagree.
 //!
 //! The button half is a `gpio::Edge`, which is the first future here over an
 //! event nobody requested. It is worth knowing that it samples rather than
@@ -107,8 +114,17 @@ fn main() {
                 if let Ok((pin, state)) = edge {
                     let _ = writeln!(Console::writer(), "GP{pin} -> {state:?}, stopping");
                 }
-                Stepper::stop()?;
-                step.await
+
+                let reported = Stepper::stop()?;
+                let awaited = step.await?;
+
+                if reported != awaited {
+                    let _ = writeln!(
+                        Console::writer(),
+                        "the two counts disagree: stop said {reported}, the run said {awaited}"
+                    );
+                }
+                Ok(awaited)
             }
         }
     });

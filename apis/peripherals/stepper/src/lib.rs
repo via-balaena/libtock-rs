@@ -64,23 +64,27 @@ impl<S: Syscalls, C: platform::subscribe::Config> Stepper<S, C> {
         Self::run(command::STEP_REVERSE, steps, interval)
     }
 
-    /// Stops a movement and de-energises the coils.
+    /// Stops a movement and de-energises the coils, returning the number of
+    /// steps the stopped movement had taken.
     ///
-    /// The stopped movement still reports: its completion upcall carries the
-    /// partial step count, which for an open-loop motor is the only record of
-    /// where it ended up. So a `step_forward` blocked in its yield loop returns
-    /// `Ok(partial)` rather than hanging or losing the position.
+    /// The count comes back two ways, and they are not redundant. The
+    /// completion upcall is the *run's* end, so a caller awaiting it needs the
+    /// stop to provoke it or the wait never finishes; a `step_forward` blocked
+    /// in its yield loop therefore returns `Ok(partial)` rather than hanging.
+    /// This return value is for whoever calls `stop`, who may not hold that
+    /// subscription at all — a future dropped by `select` takes its upcall with
+    /// it.
     ///
-    /// Returns `Reserve` if another process owns the motor. It does not
-    /// silently do nothing: a supervisor trying to stop a hung owner needs to
-    /// learn that it did not, and a silent no-op is the wrong failure mode for
-    /// the one command whose purpose is making something stop.
+    /// Returns `Reserve` unless this process owns a running movement, which
+    /// includes the case where nothing is running at all. It does not silently
+    /// do nothing: a supervisor trying to stop a hung owner needs to learn that
+    /// it did not, and a silent no-op is the wrong failure mode for the one
+    /// command whose purpose is making something stop.
     ///
     /// That also means the owner cannot reach this from a blocking call — it is
     /// inside `step_forward` for the whole movement. Reachable from an upcall
-    /// handler, or from a future's cancellation path once there is an async
-    /// driver.
-    pub fn stop() -> Result<(), ErrorCode> {
+    /// handler, or from a future's cancellation path.
+    pub fn stop() -> Result<u32, ErrorCode> {
         S::command(DRIVER_NUM, command::STOP, 0, 0).to_result()
     }
 
@@ -132,12 +136,13 @@ impl<S: Syscalls> platform::async_call::Operation<S> for StepOp {
         // movement, so only an upcall handler could stop it. Dropping a `Step`
         // now stops the motor from the owning process.
         //
-        // It also throws away the step count. The stop provokes a completion
-        // upcall carrying the partial count, and the unsubscribe that follows a
-        // cancellation clears it (TRD 104) -- so a dropped `Step` de-energises
-        // the coils correctly and forgets where the motor is, which for an
-        // open-loop motor is the whole position. [`Step`] documents what to do
-        // instead.
+        // It also throws away the step count, twice over: the stop's own return
+        // value has nowhere to go, because `cancel` returns nothing and `Drop`
+        // produces no output, and the completion upcall it provokes is cleared
+        // by the unsubscribe that follows a cancellation (TRD 104). So a
+        // dropped `Step` de-energises the coils correctly and forgets where the
+        // motor is, which for an open-loop motor is the whole position.
+        // [`Step`] documents what to do instead.
         let _ = S::command(DRIVER_NUM, command::STOP, 0, 0);
     }
 
@@ -163,10 +168,17 @@ impl<S: Syscalls> platform::async_call::Operation<S> for StepOp {
 /// select(Stepper::step_forward_async(4096, Interval(2000)), press).await
 /// ```
 ///
-/// Lend the future to `select` instead of giving it away. `Pin<&mut F>` is
-/// itself a `Future`, so the loser that `select` drops is the borrow, not the
-/// movement -- the subscription survives, and the completion upcall that the
-/// stop provokes still has somewhere to land:
+/// There are two ways out, and the general one is worth knowing even here,
+/// where the narrow one also works. The narrow one is that
+/// [`Stepper::stop`] returns the count synchronously, so a caller who stops the
+/// motor learns the position whether or not the future survives. That rescues
+/// this driver because it happens to have a stop command that reports; it does
+/// nothing for an `Operation` whose result arrives only in its upcall.
+///
+/// The general one is to lend the future to `select` instead of giving it away.
+/// `Pin<&mut F>` is itself a `Future`, so the loser that `select` drops is the
+/// borrow, not the movement -- the subscription survives, and the completion
+/// upcall that the stop provokes still has somewhere to land:
 ///
 /// ```ignore
 /// let mut step = pin!(Stepper::step_forward_async(4096, Interval(2000)));
@@ -176,7 +188,7 @@ impl<S: Syscalls> platform::async_call::Operation<S> for StepOp {
 ///     Either::Left(done) => done?,      // the movement finished on its own
 ///     Either::Right(_) => {
 ///         Stepper::stop()?;             // ask the capsule to stop ...
-///         step.await?                   // ... and collect the partial count
+///         step.await?                   // ... and collect the same count here
 ///     }
 /// };
 /// ```
