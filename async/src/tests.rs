@@ -219,7 +219,10 @@ fn console_read_resolves() {
 #[test]
 fn console_read_cancelled_unallows_and_aborts() {
     let kernel = fake::Kernel::new();
-    let driver = fake::Console::new_with_input(b"hello");
+    // Deferred, so the read is genuinely in flight when the future is dropped.
+    // The default console answers a read before READ returns, which would leave
+    // nothing for the abort to cancel.
+    let driver = fake::Console::new_deferred();
     kernel.add_driver(&driver);
     let _ = kernel.take_syscall_log();
 
@@ -231,6 +234,10 @@ fn console_read_cancelled_unallows_and_aborts() {
         // Registers the buffer and starts the receive. No yield, so no upcall
         // can have been delivered yet.
         assert!(read.as_mut().poll(&mut context).is_pending());
+        assert!(
+            driver.is_receiving(),
+            "polling should have started a receive"
+        );
 
         let log = kernel.take_syscall_log();
         assert!(
@@ -270,6 +277,12 @@ fn console_read_cancelled_unallows_and_aborts() {
             }
         )),
         "dropping a started Read must also abort the receive"
+    );
+    // The assertion the ABORT check could not make until the fake modelled an
+    // outstanding receive: the driver is no longer mid-read.
+    assert!(
+        !driver.is_receiving(),
+        "dropping a started Read must end the receive, not just send an abort"
     );
 }
 

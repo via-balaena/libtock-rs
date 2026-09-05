@@ -60,3 +60,56 @@ fn kernel_integration() {
         );
     });
 }
+
+// Aborting an outstanding read must end it. Without this a consumer-side
+// cancellation test can only assert that command 3 was sent.
+#[test]
+fn abort_ends_an_outstanding_read() {
+    use fake::SyscallDriver;
+    let kernel = fake::Kernel::new();
+    let console = fake::Console::new_deferred();
+    kernel.add_driver(&console);
+
+    assert!(!console.is_receiving());
+    assert!(console.command(fake::console::READ, 8, 0).is_success());
+    assert!(console.is_receiving(), "a deferred read stays in flight");
+
+    assert!(console.command(fake::console::ABORT, 0, 0).is_success());
+    assert!(!console.is_receiving(), "abort must end the receive");
+
+    // The kernel's abort succeeds whether or not anything was outstanding.
+    assert!(console.command(fake::console::ABORT, 0, 0).is_success());
+}
+
+// The default constructors answer a read before READ returns, even with no
+// input to give. Blocking `Console::read` relies on that, so pin it.
+#[test]
+fn new_answers_a_read_immediately() {
+    use fake::SyscallDriver;
+    let kernel = fake::Kernel::new();
+    let console = fake::Console::new();
+    kernel.add_driver(&console);
+
+    assert!(console.command(fake::console::READ, 8, 0).is_success());
+    assert!(!console.is_receiving());
+}
+
+// A deferred read ends when input is supplied. The bytes themselves are not
+// checked here -- no buffer is allowed when driving the driver directly -- and
+// libtock_async's console_read_resolves covers delivery.
+#[test]
+fn deferred_read_completes_on_input() {
+    use fake::SyscallDriver;
+    let kernel = fake::Kernel::new();
+    let console = fake::Console::new_deferred();
+    kernel.add_driver(&console);
+
+    assert!(console.command(fake::console::READ, 8, 0).is_success());
+    assert!(console.is_receiving());
+
+    console.fire_read(b"hi");
+    assert!(
+        !console.is_receiving(),
+        "supplying input completes the read"
+    );
+}
