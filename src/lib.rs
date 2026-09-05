@@ -123,6 +123,11 @@ pub mod spi_controller {
     use libtock_spi_controller as spi_controller;
     pub type SpiController = spi_controller::SpiController<super::runtime::TockSyscalls>;
 }
+pub mod stepper {
+    use libtock_stepper as stepper;
+    pub type Stepper = stepper::Stepper<super::runtime::TockSyscalls>;
+    pub use stepper::Interval;
+}
 pub mod temperature {
     use libtock_temperature as temperature;
     pub type Temperature = temperature::Temperature<super::runtime::TockSyscalls>;
