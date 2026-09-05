@@ -71,6 +71,11 @@ impl<S: Syscalls, C: platform::subscribe::Config> Stepper<S, C> {
     /// where it ended up. So a `step_forward` blocked in its yield loop returns
     /// `Ok(partial)` rather than hanging or losing the position.
     ///
+    /// Returns `Reserve` if another process owns the motor. It does not
+    /// silently do nothing: a supervisor trying to stop a hung owner needs to
+    /// learn that it did not, and a silent no-op is the wrong failure mode for
+    /// the one command whose purpose is making something stop.
+    ///
     /// That also means the owner cannot reach this from a blocking call — it is
     /// inside `step_forward` for the whole movement. Reachable from an upcall
     /// handler, or from a future's cancellation path once there is an async
