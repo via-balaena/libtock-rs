@@ -15,6 +15,9 @@
 mod allow_ro;
 
 #[cfg(test)]
+mod async_call_tests;
+
+#[cfg(test)]
 mod allow_rw;
 
 #[cfg(test)]
