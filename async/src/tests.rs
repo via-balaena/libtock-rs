@@ -170,3 +170,88 @@ fn completed_sleep_does_not_stop() {
         "a Sleep that fired has no alarm left to stop"
     );
 }
+
+// -----------------------------------------------------------------------------
+// Console: the allow path
+// -----------------------------------------------------------------------------
+
+use libtock_console::Console;
+
+type TestConsole = Console<fake::Syscalls>;
+
+const CONSOLE_DRIVER_NUM: u32 = 1;
+const CONSOLE_ABORT: u32 = 3;
+const CONSOLE_ALLOW_READ: u32 = 1;
+
+#[test]
+fn console_read_resolves() {
+    let kernel = fake::Kernel::new();
+    let driver = fake::Console::new_with_input(b"hello");
+    kernel.add_driver(&driver);
+
+    let output =
+        crate::block_on::<fake::Syscalls, _>(TestConsole::read_async::<16>()).expect("read failed");
+
+    assert_eq!(output.bytes(), b"hello");
+    assert_eq!(output.count(), 5);
+}
+
+/// The property the whole owned-buffer design exists for: a read cancelled
+/// mid-flight must hand the buffer back before the future's memory goes away,
+/// and must not leave the console driver mid-receive.
+#[test]
+fn console_read_cancelled_unallows_and_aborts() {
+    let kernel = fake::Kernel::new();
+    let driver = fake::Console::new_with_input(b"hello");
+    kernel.add_driver(&driver);
+    let _ = kernel.take_syscall_log();
+
+    {
+        let read = TestConsole::read_async::<16>();
+        let mut read = pin!(read);
+        let mut context = Context::from_waker(Waker::noop());
+
+        // Registers the buffer and starts the receive. No yield, so no upcall
+        // can have been delivered yet.
+        assert!(read.as_mut().poll(&mut context).is_pending());
+
+        let log = kernel.take_syscall_log();
+        assert!(
+            log.iter().any(|entry| matches!(
+                entry,
+                SyscallLogEntry::AllowRw {
+                    driver_num: CONSOLE_DRIVER_NUM,
+                    buffer_num: CONSOLE_ALLOW_READ,
+                    len: 16,
+                }
+            )),
+            "polling should have allowed the 16-byte buffer"
+        );
+    }
+
+    let log = kernel.take_syscall_log();
+
+    assert!(
+        log.iter().any(|entry| matches!(
+            entry,
+            SyscallLogEntry::AllowRw {
+                driver_num: CONSOLE_DRIVER_NUM,
+                buffer_num: CONSOLE_ALLOW_READ,
+                len: 0,
+            }
+        )),
+        "dropping a started Read must unallow, or the kernel keeps writing into \
+         memory the process is about to reuse"
+    );
+    assert!(
+        log.iter().any(|entry| matches!(
+            entry,
+            SyscallLogEntry::Command {
+                driver_id: CONSOLE_DRIVER_NUM,
+                command_id: CONSOLE_ABORT,
+                ..
+            }
+        )),
+        "dropping a started Read must also abort the receive"
+    );
+}

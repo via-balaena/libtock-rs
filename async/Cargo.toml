@@ -13,4 +13,5 @@ libtock_platform = { path = "../platform" }
 
 [dev-dependencies]
 libtock_alarm = { path = "../apis/peripherals/alarm", features = ["async"] }
+libtock_console = { path = "../apis/interface/console", features = ["async"] }
 libtock_unittest = { path = "../unittest" }

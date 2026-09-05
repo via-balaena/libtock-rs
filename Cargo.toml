@@ -27,6 +27,7 @@ rust_embedded = [
 async = [
     "libtock_async",
     "libtock_alarm/async",
+    "libtock_console/async",
 ]
 
 [dependencies]
