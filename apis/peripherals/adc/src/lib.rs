@@ -23,9 +23,22 @@ impl<S: Syscalls> Adc<S> {
             .and(Ok(()))
     }
 
-    // Initiate a sample reading
-    pub fn read_single_sample() -> Result<(), ErrorCode> {
-        S::command(DRIVER_NUM, SINGLE_SAMPLE, 0, 0).to_result()
+    /// Returns how many channels the board exposes.
+    ///
+    /// Channels are indexed from zero and which physical pin each one reaches
+    /// is a board decision, so this is the only thing an application can learn
+    /// about them portably. Worth calling before sampling a channel by number:
+    /// the count is what tells a two-axis reader that the second axis exists.
+    pub fn count() -> Result<u32, ErrorCode> {
+        S::command(DRIVER_NUM, EXISTS, 0, 0).to_result()
+    }
+
+    /// Starts a conversion on `channel`. The sample arrives in the upcall.
+    ///
+    /// Returns `NoDevice` if the board does not expose that channel; see
+    /// [`Adc::count`].
+    pub fn read_single_sample(channel: u32) -> Result<(), ErrorCode> {
+        S::command(DRIVER_NUM, SINGLE_SAMPLE, channel, 0).to_result()
     }
 
     // Register a listener to be called when the ADC conversion is finished
@@ -41,16 +54,16 @@ impl<S: Syscalls> Adc<S> {
         S::unsubscribe(DRIVER_NUM, 0)
     }
 
-    /// Initiates a synchronous ADC conversion
+    /// Initiates a synchronous ADC conversion on `channel`
     /// Returns the converted ADC value or an error
-    pub fn read_single_sample_sync() -> Result<u16, ErrorCode> {
+    pub fn read_single_sample_sync(channel: u32) -> Result<u16, ErrorCode> {
         let sample: Cell<Option<u16>> = Cell::new(None);
         let listener = ADCListener(|adc_val| {
             sample.set(Some(adc_val));
         });
         share::scope(|subscribe| {
             Self::register_listener(&listener, subscribe)?;
-            Self::read_single_sample()?;
+            Self::read_single_sample(channel)?;
             while sample.get().is_none() {
                 S::yield_wait();
             }
