@@ -66,6 +66,10 @@ embedded-hal = { version = "1.0", optional = true }
 name = "async_sleep"
 required-features = ["async"]
 
+[[example]]
+name = "async_probe"
+required-features = ["async"]
+
 [build-dependencies]
 libtock_build_scripts = { path = "build_scripts" }
 
