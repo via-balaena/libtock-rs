@@ -42,8 +42,12 @@ pub fn convert_elf(cli: &Cli, platform: &str) -> OutFiles {
     let elf = cli.elf.as_os_str();
     let mut tbf_path = cli.elf.clone();
     tbf_path.set_extension("tbf");
-    let architecture =
-        get_platform_architecture(platform).expect("Failed to determine ELF's architecture");
+    let architecture = get_platform_architecture(platform).unwrap_or_else(|| {
+        panic!(
+            "Unknown architecture for platform {platform:?}. \
+             Add it to get_platform_architecture in runner/src/elf2tab.rs."
+        )
+    });
     if cli.verbose {
         println!("ELF file: {elf:?}");
         println!("TBF path: {}", tbf_path.display());
