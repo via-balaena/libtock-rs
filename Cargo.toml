@@ -22,11 +22,19 @@ rust_embedded = [
     "libtock_gpio/rust_embedded",
 ]
 
+# Pulls in the executor and the `Future`-returning driver APIs. Kept out of the
+# default graph so apps that do not use `async` link none of it.
+async = [
+    "libtock_async",
+    "libtock_alarm/async",
+]
+
 [dependencies]
 libtock_adc = { path = "apis/peripherals/adc" }
 libtock_air_quality = { path = "apis/sensors/air_quality" }
 libtock_alarm = { path = "apis/peripherals/alarm" }
 libtock_ambient_light = { path = "apis/sensors/ambient_light" }
+libtock_async = { path = "async", optional = true }
 libtock_buttons = { path = "apis/interface/buttons" }
 libtock_buzzer = { path = "apis/interface/buzzer" }
 libtock_console = { path = "apis/interface/console" }
@@ -87,6 +95,7 @@ members = [
     "apis/sensors/proximity",
     "apis/sensors/temperature",
     "apis/storage/key_value",
+    "async",
     "libraries/embedded_graphics_libtock",
     "panic_handlers/debug_panic",
     "panic_handlers/small_panic",

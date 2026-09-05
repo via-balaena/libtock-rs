@@ -102,6 +102,134 @@ impl<S: Syscalls, C: platform::subscribe::Config> Alarm<S, C> {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Async interface
+// -----------------------------------------------------------------------------
+
+/// The state the alarm upcall writes into. This lives inside the [`Sleep`]
+/// future rather than in a `static`, so each future owns its own completion
+/// state and the pattern generalizes to drivers that support several
+/// outstanding operations.
+#[cfg(feature = "async")]
+#[derive(Default)]
+struct SleepShared {
+    fired: Cell<bool>,
+    waker: Cell<Option<core::task::Waker>>,
+}
+
+#[cfg(feature = "async")]
+impl platform::Upcall<platform::subscribe::AnyId> for SleepShared {
+    fn upcall(&self, _when: u32, _ref: u32, _arg2: u32) {
+        self.fired.set(true);
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+/// A future that resolves once the alarm fires. Create one with
+/// [`Alarm::sleep_for_async`].
+///
+/// The subscription is owned by the future, so dropping it — which is what
+/// `select` does to the loser of a race — unsubscribes before the memory the
+/// kernel would write into goes away. That is the whole reason the state is not
+/// borrowed from the caller's stack.
+///
+/// Only one `Sleep` may be polled at a time: Tock gives a process a single
+/// upcall slot per (driver, subscribe number), so a second `Sleep` polled while
+/// the first is outstanding would silently replace the first one's
+/// registration. Awaiting them in sequence is fine; racing two of them is not.
+/// Multiplexing one alarm across several deadlines needs a driver-level queue,
+/// the same problem `embassy-time-driver` solves.
+#[cfg(feature = "async")]
+pub struct Sleep<S: Syscalls, C: platform::subscribe::Config = DefaultConfig> {
+    // Declared before `shared` so that it drops first: `Subscribe::drop` issues
+    // the unsubscribe, which must happen while `shared` is still valid. The
+    // field order here is load-bearing, not cosmetic.
+    subscribe: platform::Subscribe<'static, S, DRIVER_NUM, { subscribe::CALLBACK }>,
+    shared: SleepShared,
+    ticks: Ticks,
+    started: bool,
+    // Polling hands the kernel a pointer into `shared`, so the future must not
+    // move afterwards.
+    _pinned: core::marker::PhantomPinned,
+    _config: core::marker::PhantomData<C>,
+}
+
+#[cfg(feature = "async")]
+impl<S: Syscalls, C: platform::subscribe::Config> core::future::Future for Sleep<S, C> {
+    type Output = Result<(), ErrorCode>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        context: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        use core::task::Poll;
+
+        // Safety: no field is ever moved out of the future.
+        let this = unsafe { self.get_unchecked_mut() };
+
+        if this.shared.fired.get() {
+            return Poll::Ready(Ok(()));
+        }
+
+        if !this.started {
+            // Safety: `Handle::new` requires that the list be dropped rather
+            // than forgotten or leaked. `subscribe` sits inside a `!Unpin`
+            // future that has already been pinned, so the pin drop guarantee
+            // provides exactly that.
+            let handle = unsafe { share::Handle::new(&this.subscribe) };
+
+            // Safety: the kernel retains this pointer only until the matching
+            // unsubscribe, which `Subscribe::drop` performs before `shared` is
+            // invalidated (see the field ordering above). Widening the borrow to
+            // 'static is what allows the upcall target to live in the future
+            // instead of in a `static`.
+            let shared: &'static SleepShared =
+                unsafe { core::mem::transmute::<&SleepShared, &'static SleepShared>(&this.shared) };
+
+            S::subscribe::<_, _, C, DRIVER_NUM, { subscribe::CALLBACK }>(handle, shared)?;
+
+            S::command(DRIVER_NUM, command::SET_RELATIVE, this.ticks.0, 0)
+                .to_result()
+                .map(|_when: u32| ())?;
+
+            this.started = true;
+        }
+
+        this.shared.waker.set(Some(context.waker().clone()));
+
+        // Tock delivers upcalls only inside Yield, so one cannot land between
+        // the check at the top and this store. Re-check anyway: it costs a load
+        // and keeps the future correct under any executor.
+        if this.shared.fired.get() {
+            return Poll::Ready(Ok(()));
+        }
+
+        Poll::Pending
+    }
+}
+
+#[cfg(feature = "async")]
+impl<S: Syscalls, C: platform::subscribe::Config> Alarm<S, C> {
+    /// Returns a future that resolves after `time` has elapsed.
+    ///
+    /// The frequency lookup happens here rather than on first poll, so polling
+    /// cannot fail for a reason the caller has not already had a chance to see.
+    pub fn sleep_for_async<T: Convert>(time: T) -> Result<Sleep<S, C>, ErrorCode> {
+        let freq = Self::get_frequency()?;
+
+        Ok(Sleep {
+            subscribe: Default::default(),
+            shared: Default::default(),
+            ticks: time.to_ticks(freq),
+            started: false,
+            _pinned: core::marker::PhantomPinned,
+            _config: core::marker::PhantomData,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
