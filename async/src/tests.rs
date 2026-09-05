@@ -255,3 +255,16 @@ fn console_read_cancelled_unallows_and_aborts() {
         "dropping a started Read must also abort the receive"
     );
 }
+
+/// A read with no console driver present must resolve to an error, not sit in
+/// `yield_wait` forever. `block_on` has no timeout: a future that goes `Pending`
+/// with no upcall coming blocks the process indefinitely.
+#[test]
+fn console_read_without_driver_errors() {
+    let _kernel = fake::Kernel::new();
+
+    assert!(
+        crate::block_on::<fake::Syscalls, _>(TestConsole::read_async::<16>()).is_err(),
+        "a missing driver must surface as an error from the first poll"
+    );
+}

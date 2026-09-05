@@ -135,24 +135,6 @@ impl<T: platform::allow_ro::Config + platform::allow_rw::Config + platform::subs
 // Async interface
 // -----------------------------------------------------------------------------
 
-/// The state the read upcall writes into: `(status, count)`.
-#[cfg(feature = "async")]
-#[derive(Default)]
-struct ReadShared {
-    result: Cell<Option<(u32, u32)>>,
-    waker: Cell<Option<core::task::Waker>>,
-}
-
-#[cfg(feature = "async")]
-impl platform::Upcall<platform::subscribe::AnyId> for ReadShared {
-    fn upcall(&self, status: u32, count: u32, _arg2: u32) {
-        self.result.set(Some((status, count)));
-        if let Some(waker) = self.waker.take() {
-            waker.wake();
-        }
-    }
-}
-
 /// The bytes a completed [`Read`] produced.
 #[cfg(feature = "async")]
 pub struct ReadOutput<const N: usize> {
@@ -172,46 +154,39 @@ impl<const N: usize> ReadOutput<N> {
     }
 }
 
-/// A future that resolves once the console has delivered bytes. Create one with
-/// [`Console::read_async`].
-///
-/// Unlike the blocking [`Console::read`], this does not borrow a buffer from the
-/// caller. A future holding a `&mut [u8]` from the caller's frame could be
-/// `mem::forget`-ed, which ends the borrow without running the unallow and
-/// leaves the kernel writing into stack the process is free to reuse. Owning the
-/// buffer converts that hazard into a leak: forgetting the future leaks the
-/// memory, and memory that is never reused is memory the kernel may safely keep
-/// writing to. `share::scope` avoids the same hazard with a closure, which is
-/// why it cannot span an await point.
+/// The console-specific half of a [`Read`].
 #[cfg(feature = "async")]
-pub struct Read<S: Syscalls, C: Config, const N: usize> {
-    // Drop order is load-bearing: `allow` unallows before `buffer` dies, and
-    // `subscribe` unsubscribes before `shared` dies.
-    allow: AllowRw<'static, S, DRIVER_NUM, { allow_rw::READ }>,
-    subscribe: Subscribe<'static, S, DRIVER_NUM, { subscribe::READ }>,
-    shared: ReadShared,
-    buffer: [u8; N],
-    started: bool,
-    _pinned: core::marker::PhantomPinned,
-    _config: PhantomData<C>,
-}
+pub struct ReadOp;
 
 #[cfg(feature = "async")]
-impl<S: Syscalls, C: Config, const N: usize> Read<S, C, N> {
-    /// Reclaims the buffer from the kernel and packages the result.
-    ///
-    /// The unallow must happen before anything reads `buffer`: while a buffer is
-    /// allowed, the kernel holds a mutable alias to it, so reading it through
-    /// `&self` would alias a `&mut`.
-    fn take_output(&mut self, status: u32, count: u32) -> Result<ReadOutput<N>, ErrorCode> {
-        S::unallow_rw(DRIVER_NUM, allow_rw::READ);
+impl<S: Syscalls, const N: usize> platform::async_call::BufferedOperation<S, N> for ReadOp {
+    type Value = ReadOutput<N>;
+
+    fn start(&self, len: usize) -> Result<(), ErrorCode> {
+        S::command(DRIVER_NUM, command::READ, len as u32, 0).to_result::<(), ErrorCode>()
+    }
+
+    fn cancel(&self) {
+        // Unallowing alone would leave the console driver mid-receive with
+        // nowhere to put the bytes. Command 3 aborts the receive and reports
+        // what arrived so far; that upcall is discarded by the unsubscribe that
+        // follows.
+        let _ = S::command(DRIVER_NUM, command::ABORT, 0, 0);
+    }
+
+    fn complete(
+        &self,
+        args: (u32, u32, u32),
+        buffer: &[u8; N],
+    ) -> Result<ReadOutput<N>, ErrorCode> {
+        let (status, count, _) = args;
 
         if status != 0 {
             return Err(status.try_into().unwrap_or(ErrorCode::Fail));
         }
 
         Ok(ReadOutput {
-            buffer: self.buffer,
+            buffer: *buffer,
             // The kernel should never report more than it was given room for,
             // but clamp rather than trust it: this length indexes a slice.
             count: core::cmp::min(count as usize, N),
@@ -219,82 +194,25 @@ impl<S: Syscalls, C: Config, const N: usize> Read<S, C, N> {
     }
 }
 
+/// A future that resolves once the console has delivered bytes. Create one with
+/// [`Console::read_async`].
+///
+/// Unlike the blocking [`Console::read`], this does not borrow a buffer from the
+/// caller. A future holding a `&mut [u8]` from the caller's frame could be
+/// `mem::forget`-ed, which ends the borrow without running the unallow and
+/// leaves the kernel writing into stack the process is free to reuse. Owning the
+/// buffer converts that hazard into a leak, and memory that is never reused is
+/// memory the kernel may safely keep writing to.
 #[cfg(feature = "async")]
-impl<S: Syscalls, C: Config, const N: usize> core::future::Future for Read<S, C, N> {
-    type Output = Result<ReadOutput<N>, ErrorCode>;
-
-    fn poll(
-        self: core::pin::Pin<&mut Self>,
-        context: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Self::Output> {
-        use core::task::Poll;
-
-        // Safety: no field is ever moved out of the future.
-        let this = unsafe { self.get_unchecked_mut() };
-
-        if let Some((status, count)) = this.shared.result.get() {
-            return Poll::Ready(this.take_output(status, count));
-        }
-
-        if !this.started {
-            // Safety: both share objects live in a `!Unpin` future that has
-            // already been pinned, so the pin drop guarantee runs their `Drop`
-            // -- the unallow and the unsubscribe -- before this memory is
-            // invalidated. That is exactly what `Handle::new` requires.
-            let allow_handle = unsafe { share::Handle::new(&this.allow) };
-            let subscribe_handle = unsafe { share::Handle::new(&this.subscribe) };
-
-            // Safety: the kernel holds the buffer only until the unallow, which
-            // happens in `take_output` on completion and in `AllowRw::drop`
-            // otherwise. Both precede any read of `buffer` and the end of its
-            // life. Nothing touches `buffer` while it is allowed.
-            let buffer: &'static mut [u8] = unsafe {
-                core::mem::transmute::<&mut [u8], &'static mut [u8]>(&mut this.buffer[..])
-            };
-            let shared: &'static ReadShared =
-                unsafe { core::mem::transmute::<&ReadShared, &'static ReadShared>(&this.shared) };
-
-            S::allow_rw::<C, DRIVER_NUM, { allow_rw::READ }>(allow_handle, buffer)?;
-            S::subscribe::<_, _, C, DRIVER_NUM, { subscribe::READ }>(subscribe_handle, shared)?;
-            S::command(DRIVER_NUM, command::READ, N as u32, 0).to_result::<(), ErrorCode>()?;
-
-            this.started = true;
-        }
-
-        // Only clone when the executor handed us a waker that would not wake the
-        // same task. See `libtock_alarm::Sleep` for why the empty window between
-        // the take and the set is safe.
-        let stored = this.shared.waker.take();
-        this.shared.waker.set(match stored {
-            Some(waker) if waker.will_wake(context.waker()) => Some(waker),
-            _ => Some(context.waker().clone()),
-        });
-
-        if let Some((status, count)) = this.shared.result.get() {
-            return Poll::Ready(this.take_output(status, count));
-        }
-
-        Poll::Pending
-    }
-}
-
-#[cfg(feature = "async")]
-impl<S: Syscalls, C: Config, const N: usize> Drop for Read<S, C, N> {
-    /// Cancels a receive still outstanding in the kernel.
-    ///
-    /// Unallowing alone would leave the console driver mid-receive with nowhere
-    /// to put the bytes. Command 3 aborts the receive and reports what arrived
-    /// so far; that upcall is then discarded, because `Subscribe::drop` runs
-    /// immediately afterwards and unsubscribing clears queued upcalls for the
-    /// slot (TRD 104).
-    fn drop(&mut self) {
-        if self.started && self.shared.result.get().is_none() {
-            // Nothing useful to do with a failure: the read is being torn down
-            // either way.
-            let _ = S::command(DRIVER_NUM, command::ABORT, 0, 0);
-        }
-    }
-}
+pub type Read<S, C, const N: usize> = platform::async_call::BufferedCall<
+    S,
+    C,
+    ReadOp,
+    DRIVER_NUM,
+    { subscribe::READ },
+    { allow_rw::READ },
+    N,
+>;
 
 #[cfg(feature = "async")]
 impl<S: Syscalls, C: Config> Console<S, C> {
@@ -302,15 +220,7 @@ impl<S: Syscalls, C: Config> Console<S, C> {
     ///
     /// `N` is chosen at the call site: `Console::<S>::read_async::<64>()`.
     pub fn read_async<const N: usize>() -> Read<S, C, N> {
-        Read {
-            allow: Default::default(),
-            subscribe: Default::default(),
-            shared: Default::default(),
-            buffer: [0; N],
-            started: false,
-            _pinned: core::marker::PhantomPinned,
-            _config: PhantomData,
-        }
+        platform::async_call::BufferedCall::new(ReadOp)
     }
 }
 

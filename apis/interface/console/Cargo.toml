@@ -14,7 +14,7 @@ description = "libtock console driver"
 [features]
 # Adds `Future`-returning APIs alongside the blocking ones. Off by default so
 # apps that only call `write`/`read` link no waker machinery.
-async = []
+async = ["libtock_platform/async"]
 
 [dependencies]
 libtock_platform = { path = "../../../platform" }

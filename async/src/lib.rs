@@ -11,6 +11,9 @@
 //! over the same driver futures.
 
 #![cfg_attr(not(test), no_std)]
+// The executor layer needs no `unsafe` of its own: everything subtle lives in
+// `libtock_platform::async_call`, audited once. Lock that in.
+#![forbid(unsafe_code)]
 
 use core::future::Future;
 use core::pin::pin;
