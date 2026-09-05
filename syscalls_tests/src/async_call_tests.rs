@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::task::Wake;
 
 use libtock_platform::async_call::{BufferedCall, BufferedOperation, Operation};
-use libtock_platform::{DefaultConfig, ErrorCode, Syscalls};
+use libtock_platform::{CommandReturn, DefaultConfig, ErrorCode, Syscalls};
 use libtock_unittest::{fake, DriverInfo, DriverShareRef, RwAllowBuffer, SyscallLogEntry};
 
 const DRIVER_NUM: u32 = 42;
@@ -23,8 +23,14 @@ const BUFFER_NUM: u32 = 0;
 const START: u32 = 1;
 const CANCEL: u32 = 2;
 
-/// The arguments the driver reports through its upcall.
-const UPCALL_ARGS: (u32, u32, u32) = (7, 2, 9);
+/// What the driver writes into an allowed buffer.
+const PAYLOAD: &[u8] = b"hi";
+
+/// The arguments the driver reports through its upcall. The middle field is the
+/// byte count, so it is derived from `PAYLOAD` rather than restated: the two
+/// must agree, and a test that pinned them independently would fail confusingly
+/// when only one changed.
+const UPCALL_ARGS: (u32, u32, u32) = (7, PAYLOAD.len() as u32, 9);
 
 // -----------------------------------------------------------------------------
 // A driver that exists only to drive the primitives
@@ -68,8 +74,8 @@ impl fake::SyscallDriver for TestDriver {
                 // Write into the allowed buffer, if there is one, so buffered
                 // tests can prove the bytes survive the hand-back.
                 let mut buffer = self.buffer.borrow_mut();
-                if buffer.len() >= 2 {
-                    buffer[..2].copy_from_slice(b"hi");
+                if buffer.len() >= PAYLOAD.len() {
+                    buffer[..PAYLOAD.len()].copy_from_slice(PAYLOAD);
                 }
                 self.share_ref
                     .schedule_upcall(SUBSCRIBE_NUM, UPCALL_ARGS)
@@ -93,8 +99,6 @@ impl fake::SyscallDriver for TestDriver {
         }
     }
 }
-
-use libtock_platform::CommandReturn;
 
 // -----------------------------------------------------------------------------
 // Test operations
@@ -169,6 +173,18 @@ type TestCall<'a> = libtock_platform::async_call::Call<
     SUBSCRIBE_NUM,
 >;
 
+/// Eight bytes is comfortably larger than `PAYLOAD`, so the buffered tests cover
+/// a short read rather than an exactly-filled buffer.
+type TestBufferedCall<'a> = BufferedCall<
+    fake::Syscalls,
+    DefaultConfig,
+    TestBufferedOp<'a>,
+    DRIVER_NUM,
+    SUBSCRIBE_NUM,
+    BUFFER_NUM,
+    8,
+>;
+
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
@@ -188,6 +204,10 @@ impl Wake for CountingWaker {
 /// Polls to completion, yielding in between so the fake kernel can deliver its
 /// upcall. Deliberately not `libtock_async::block_on`: these tests should fail
 /// when the primitive breaks, not when the executor does.
+///
+/// This cannot hang a test run. The fake kernel panics on a `yield_wait` with no
+/// upcall pending -- "friendlier than hanging" -- so a future that never
+/// resolves fails loudly instead of blocking forever.
 fn drive<F: Future>(mut future: Pin<&mut F>, waker: &Waker) -> F::Output {
     let mut context = Context::from_waker(waker);
     loop {
@@ -291,6 +311,7 @@ fn start_failure_surfaces_and_skips_cancel() {
     let kernel = fake::Kernel::new();
     let driver = TestDriver::failing();
     kernel.add_driver(&driver);
+    let _ = kernel.take_syscall_log();
 
     let journal = Journal::default();
     let waker: Waker = Arc::new(CountingWaker(AtomicU32::new(0))).into();
@@ -308,6 +329,14 @@ fn start_failure_surfaces_and_skips_cancel() {
         journal.cancels.get(),
         0,
         "an operation that never started has nothing to cancel"
+    );
+    // `subscribe` succeeded before `start` failed, so a registration is live at
+    // the point the future resolves with an error. This is the one error path
+    // where the teardown the whole design rests on was not being checked.
+    assert_eq!(
+        subscribe_count(&kernel.take_syscall_log()),
+        2,
+        "a failed start must still leave the subscription unregistered on drop"
     );
 }
 
@@ -387,19 +416,11 @@ fn buffered_call_hands_back_the_written_buffer() {
 
     let journal = Journal::default();
     let waker: Waker = Arc::new(CountingWaker(AtomicU32::new(0))).into();
-    let call = pin!(BufferedCall::<
-        fake::Syscalls,
-        DefaultConfig,
-        TestBufferedOp,
-        DRIVER_NUM,
-        SUBSCRIBE_NUM,
-        BUFFER_NUM,
-        8,
-    >::new(TestBufferedOp { journal: &journal }));
+    let call = pin!(TestBufferedCall::new(TestBufferedOp { journal: &journal }));
 
-    assert_eq!(drive(call, &waker), Ok(UPCALL_ARGS.1 as usize));
+    assert_eq!(drive(call, &waker), Ok(PAYLOAD.len()));
     assert_eq!(journal.start_len.get(), Some(8), "start receives N");
-    assert_eq!(&journal.completed_bytes.borrow()[..2], b"hi");
+    assert_eq!(&journal.completed_bytes.borrow()[..PAYLOAD.len()], PAYLOAD);
 
     assert!(
         kernel.take_syscall_log().iter().any(|entry| matches!(
@@ -426,15 +447,7 @@ fn buffered_call_cancelled_unallows_and_cancels() {
     let mut context = Context::from_waker(&waker);
 
     {
-        let mut call = pin!(BufferedCall::<
-            fake::Syscalls,
-            DefaultConfig,
-            TestBufferedOp,
-            DRIVER_NUM,
-            SUBSCRIBE_NUM,
-            BUFFER_NUM,
-            8,
-        >::new(TestBufferedOp { journal: &journal }));
+        let mut call = pin!(TestBufferedCall::new(TestBufferedOp { journal: &journal }));
         assert!(call.as_mut().poll(&mut context).is_pending());
     }
 
