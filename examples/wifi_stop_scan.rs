@@ -1,5 +1,22 @@
 //! Asks whether `stop_scan` can stop a scan, by calling it in four states and
-//! comparing the answers.
+//! comparing the answers. **It cannot**, and this app is why that is a
+//! measurement rather than a reading.
+//!
+//! # Measured
+//!
+//! Pico 2 W, kernel `0b229f354`, 2026-09-10, run by the kernel session.
+//! 48 networks seen.
+//!
+//! ```text
+//! A idle              command 8 -> Ok(())     expected not BUSY  ok
+//! B scan starting     command 8 -> Err(BUSY)  expected BUSY      ok
+//! C scan running      command 8 -> Err(BUSY)  expected BUSY      ok
+//! D after terminator  command 8 -> Ok(())     expected not BUSY  ok
+//! ```
+//!
+//! All four matched. A and D are what make it a finding rather than a
+//! suspicion: the command works on this radio, it simply cannot do the one
+//! thing it is named for.
 //!
 //! # The claim under test
 //!
@@ -12,8 +29,26 @@
 //! set for the whole life of a scan, cleared only by a scan-done event
 //! (`:470-476`).
 //!
-//! That was noticed while correcting a different claim and has never been run.
-//! It is a reading, which is why this app exists.
+//! That was noticed while correcting a different claim — an earlier version of
+//! `wifi_scan_exit.rs` said `stop_scan` merely narrowed the window for an
+//! exiting app, a race, and following `init_tasks` one call further showed
+//! there is no window. It left this question behind, which nobody had asked.
+//!
+//! # What this app cannot answer
+//!
+//! **Whether a stop that was allowed through would actually end the scan.** The
+//! obvious next phase — issue the stop at C, then watch for a terminator —
+//! cannot work, and it is worth saying so here so nobody builds it. At C the
+//! command returns `BUSY` from `init_tasks` *before* `stop_scan` queues an
+//! ioctl or sets any state, so the radio is never told anything. The terminator
+//! that follows is the scan ending by itself, which would have arrived
+//! regardless, and observing it says nothing about stopping.
+//!
+//! Since `pending` is cleared only by a scan-done event (`:470-476`), a fix
+//! that relaxes the guard also needs to know whether the radio answers a stop
+//! with one. That question cannot be reached from userspace on a kernel whose
+//! guard still refuses the command: it needs the guard relaxed first, which
+//! makes it a kernel spike rather than an app.
 //!
 //! # Why four calls and not one
 //!
