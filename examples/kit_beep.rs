@@ -4,6 +4,18 @@
 //! make raspberry_pi_pico_2_w EXAMPLE=kit_beep
 //! ```
 //!
+//! **This no longer runs on the Pico 2 W, and that is the point of it.** The
+//! measurements below argued for a PWM-backed buzzer; the kernel now has one,
+//! GP13 belongs to it, and the pin was removed from the board's GPIO array in
+//! `4f384c679` so that nothing can fight the PWM for it. So `get_pin(13)` now
+//! answers NODEVICE here and this app says so and stops — which is the correct
+//! outcome, not a regression. `examples/kit_tune.rs` is the successor, and the
+//! note at the top of `main` about `Buzzer::tone` being the right way to do
+//! this came true.
+//!
+//! It is kept because the numbers are the argument that produced the driver,
+//! and because it still runs on any board that exposes GP13 as a plain pin.
+//!
 //! There are two kinds of beeper in these kits and they need opposite things.
 //! An *active* one contains its own oscillator: hold the pin high and it
 //! sounds, at whatever pitch it was built for. A *passive* one is a bare
