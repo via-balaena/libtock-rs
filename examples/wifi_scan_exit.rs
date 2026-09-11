@@ -1,9 +1,16 @@
 //! Starts a WiFi scan and terminates the process while results are still
-//! arriving, which panics the kernel. This is the repro.
+//! arriving. This used to panic the kernel. **It is now a regression test, and
+//! the passing outcome is that nothing happens.**
+//!
+//! Read that before flashing it: on a fixed kernel this app prints three lines
+//! and exits, and the bench is not broken. On a kernel without the fix it takes
+//! the board down. Which of those you get is the measurement.
 //!
 //! # Measured
 //!
-//! Pico 2 W, kernel `839a242f3`, 2026-09-10, run by the kernel session:
+//! Both on a Pico 2 W, 2026-09-10, run by the kernel session.
+//!
+//! **Before the fix**, kernel `839a242f3`:
 //!
 //! ```text
 //! wifi_scan_exit: init ok after 380 ms
@@ -14,15 +21,35 @@
 //! called `Result::unwrap()` on an `Err` value: InactiveApp
 //! ```
 //!
-//! The predicted line and the predicted error variant, both exact.
+//! The predicted line and the predicted error variant, both exact. 4092 bytes
+//! of panic dump.
 //!
-//! The kernel's own dump assigns the app no fault: `Completion Code: 0`,
+//! **After the fix**, `0f44a11a7`, this app unmodified:
+//!
+//! ```text
+//! wifi_scan_exit: 2 networks after 40 ms — terminating now with the scan
+//!                 still running.
+//!
+//! tock$ list
+//!  0  Unique  wifi_scan_exit  0  194  0  0/5  Terminated
+//! tock$ status
+//!  Total processes: 1 / Active processes: 0
+//! ```
+//!
+//! 215 bytes total and nothing below that line. The `list` and `status` matter
+//! more than the silence: a kernel that had died quietly would also print
+//! nothing, so the check is that it still services the console and answers
+//! afterwards, with the app Terminated and its grants released.
+//!
+//! # Why it mattered
+//!
+//! The kernel's own dump assigned the app no fault: `Completion Code: 0`,
 //! `Last Syscall: Exit { which: 0, completion_code: 0 }`, and "No Cortex-M
 //! faults detected". The process exited cleanly, which processes are allowed to
-//! do. So any process permitted to use driver `0x30008` can halt the kernel by
-//! starting a scan and leaving, and **there is no userspace mitigation**: an app
-//! cannot decline to be terminated, and calling `stop_scan` on the way out
-//! narrows the window rather than closing it.
+//! do. So on an unfixed kernel any process permitted to use driver `0x30008`
+//! could halt the board by starting a scan and leaving, and **no userspace
+//! mitigation existed**: an app cannot decline to be terminated, and calling
+//! `stop_scan` on the way out does not help.
 //!
 //! That last part is checkable rather than hopeful, and it is worse than a
 //! race: **`stop_scan` cannot stop a scan at all.** Every device entry point
@@ -37,8 +64,12 @@
 //! An app that tries to be tidy on the way out therefore gets an error and
 //! exits anyway. This is not a window it might miss; there is no window.
 //!
-//! That makes this a denial of service from userspace rather than merely an
-//! unwrap that can fail.
+//! That is what made it a denial of service from userspace rather than merely an
+//! unwrap that can fail. **This part is unfixed and still current:** `0f44a11a7`
+//! stops the panic, not the scan, so command 8 still cannot stop one. Nothing
+//! here depends on it — this app never calls `stop_scan` — but a reader who
+//! takes the `BUSY` behaviour as history rather than present tense will be
+//! wrong.
 //!
 //! # What it is not
 //!
@@ -83,10 +114,16 @@
 //!
 //! # The mechanism
 //!
-//! `capsules/extra/src/wifi/driver.rs:303` unwraps `grants.enter`, which is
-//! fallible. `scan_done` twenty lines above it, at `:280-286`, calls the same
-//! `grants.enter` and does not unwrap. If the failing branch is reachable, that
-//! asymmetry is a kernel panic driven by a radio interrupt.
+//! Line numbers below are at `839a242f3`, the kernel that still had the defect;
+//! `0f44a11a7` moved them. Steps 1 through 4 are unchanged by the fix and still
+//! describe what happens — a result still reaches a dead process's grant and
+//! still comes back `InactiveApp`. Only step 5 changed: the `Err` is now
+//! dropped the way `scan_done` always dropped it, instead of unwrapped.
+//!
+//! `capsules/extra/src/wifi/driver.rs:303` unwrapped `grants.enter`, which is
+//! fallible. `scan_done` twenty lines above it, at `:280-286`, called the same
+//! `grants.enter` and did not unwrap. That asymmetry was a kernel panic driven
+//! by a radio interrupt, if the failing branch could be reached.
 //!
 //! Reading the kernel said it should be reachable, and the run above confirmed
 //! every step. Each has a referent:
@@ -103,7 +140,8 @@
 //! 4. But `grant_is_allocated` returns `None` for anything not running
 //!    (`process_standard.rs:1206-1210`), and `ProcessGrant::new_inner` turns
 //!    that into `Err(Error::InactiveApp)` (`grant.rs:1152-1155`).
-//! 5. `Grant::enter` propagates it (`grant.rs:1739-1743`), and `:303` unwraps.
+//! 5. `Grant::enter` propagates it (`grant.rs:1739-1743`), and `:303` unwrapped
+//!    it. Since `0f44a11a7` it is `let _ =`, so the result is dropped.
 //!
 //! The one step reading could not establish was the first: whether a scan
 //! result actually arrives in the window after the process is gone. Steps 3-5
@@ -113,15 +151,23 @@
 //!
 //! # Reading a rerun
 //!
-//! - **Kernel panic** — the path fired, as above.
-//! - **No panic** — either no result arrived after the process died, or the
-//!   path tolerated it. This app cannot tell those apart from userspace, so a
-//!   quiet run is not evidence the unwrap is safe; it is evidence the window was
-//!   missed. More networks in range widens it.
-//!
 //! The process is gone before the verdict, so it lands on the console and at the
-//! `tock$` prompt, not in this app's output. A run that does not panic should
-//! leave `list` showing the app Terminated and the kernel still answering.
+//! `tock$` prompt, not in this app's output.
+//!
+//! - **Kernel panic** — on a kernel carrying `0f44a11a7`, that is a regression,
+//!   and this app is the repro for it. On one without, it is the original
+//!   defect.
+//! - **No panic, and the console still answers** — the fix is holding. Check
+//!   `list` and `status` rather than the silence alone.
+//! - **No panic and no console** — not a pass. A kernel that died quietly looks
+//!   identical to one that survived, from the app's output.
+//!
+//! One thing this app still cannot distinguish, on any kernel: a run where no
+//! result arrived after the process died looks exactly like a run where one
+//! arrived and was handled. Two networks in 40 ms out of forty-odd says
+//! delivery was live when it left, which is the best evidence available from
+//! userspace, but it is not proof the window was entered. More networks in
+//! range widens it.
 //!
 //! # Why it exits this early
 //!

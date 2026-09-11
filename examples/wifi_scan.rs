@@ -28,10 +28,22 @@
 //!
 //! ## Upcall 7 means two things, and the length separates them
 //!
-//! `scanned_network` copies the SSID into rw_allow 1 and fires upcall 7 with
-//! the SSID length in argument 0 (`driver.rs:301`); `scan_done` fires the same
-//! upcall 7 with length 0 (`driver.rs:283`). Arguments 1 and 2 are 0 in both.
-//! So the length is the only thing telling a result from the end of the scan.
+//! `scanned_network` copies the SSID into rw_allow 1 and fires upcall 7 with a
+//! length in argument 0; `scan_done` fires the same upcall 7 with length 0.
+//! Arguments 1 and 2 are 0 in both. So the length is the only thing telling a
+//! result from the end of the scan.
+//!
+//! **What that length counts changed on 2026-09-10.** Before `0b229f354` it was
+//! the SSID's true length, which was the defect the second pass below was built
+//! to catch. Since `0b229f354` it is the number of bytes actually written into
+//! the caller's buffer — "bytes you may read" rather than "bytes that exist" —
+//! and a result that would have been reported with nothing written is dropped
+//! instead, because zero is the terminator.
+//!
+//! A caller wanting complete SSIDs should offer 32 bytes and stop thinking
+//! about it. A caller offering less can no longer detect that it was truncated:
+//! the old signal was the mismatch between the reported length and the buffer
+//! size, and that only worked because the number was wrong.
 //!
 //! That is sound, and not by convention: `Ssid` carries its length as a
 //! `NonZeroU8` (`wifi/device.rs:40`) and `Credential::try_new` rejects 0
@@ -72,21 +84,33 @@
 //! networks and then no terminator is the ambiguous case; zero networks and no
 //! terminator is not.
 //!
-//! # The second pass, and why the length is worth distrusting
+//! # The second pass, which is now a regression check
 //!
-//! `driver.rs:296-297` clamps the copy to the smaller of the SSID and the
-//! caller's buffer, but `driver.rs:301` schedules the upcall with the
-//! *unclamped* `ssid.len`. A caller whose buffer is shorter than the SSID is
-//! told a length it did not receive, and reads stale bytes if it believes it.
+//! At `839a242f3`, `driver.rs:296-297` clamped the copy to the smaller of the
+//! SSID and the caller's buffer while `driver.rs:301` scheduled the upcall with
+//! the *unclamped* `ssid.len`. A caller whose buffer was shorter than the SSID
+//! was told a length it had not received, and read stale bytes if it believed
+//! it.
 //!
-//! That is a code reading, so this app turns it into an observation. It scans
+//! That was a code reading, so this app turned it into an observation. It scans
 //! twice: once offering the kernel a 32-byte buffer, which is `wifi::len::SSID`
 //! and therefore cannot truncate, and once offering 8 bytes, which truncates
 //! most names. Both passes run back to back in one flash so the networks in
-//! range are about the same for each, and the second pass counts how many
-//! results reported more bytes than the buffer could hold. If that count is
-//! nonzero while the first pass's count is zero, the mismatch is measured
-//! rather than argued.
+//! range are about the same for each, and each pass counts how many results
+//! reported more bytes than the buffer could hold.
+//!
+//! **The fix landed, so the expected reading inverted.** On `0b229f354` and
+//! after, both counts should be zero and the over-buffer line should not appear
+//! at all, because a reported length can no longer exceed the buffer it was
+//! written into. The app is unchanged and needs no flag: the same two passes
+//! that demonstrated the defect now demonstrate its absence, and a nonzero
+//! count on a fixed kernel is a regression.
+//!
+//! Keep the short pass even though it looks redundant now. A run where every
+//! reported length is exactly 8 would also be produced by a kernel that had
+//! started *flattening* lengths to the buffer size rather than clamping the
+//! copy, and the short pass is what distinguishes those: real SSIDs shorter
+//! than the buffer must still report their own length.
 //!
 //! # Measured
 //!
@@ -113,6 +137,18 @@
 //! last line is the whole finding in one network: the kernel said 13 bytes and
 //! wrote 8, so a caller that trusts the length reads 5 bytes it was never
 //! given.
+//!
+//! **Third run, after the fix**, kernel `0b229f354`, this app unmodified:
+//!
+//! ```text
+//! wifi_scan[short]: lengths 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 6 8 4 8 8
+//! ```
+//!
+//! No over-buffer line at all, which is the pass condition. The 6 and the 4 are
+//! the part that makes it a real check rather than a tautology: those are SSIDs
+//! genuinely shorter than the buffer, still reporting their own length, so the
+//! kernel is clamping the number to what it wrote and not flattening it to the
+//! buffer size.
 //!
 //! Also settled, since this file previously recorded it as unverified: the
 //! capsule **does** accept a second `command 7` after `scan_done`. Pass 2
@@ -391,8 +427,10 @@ fn scan(console: &mut impl Write, ssid: &mut [u8], label: &str) {
     }
     let _ = writeln!(console);
 
-    // The finding, stated as a count rather than an argument: every one of these
-    // is a result the kernel described as longer than the buffer it copied into.
+    // A result the kernel described as longer than the buffer it copied into.
+    // This printed 18 of 24 against an 8-byte buffer before `0b229f354`; on that
+    // commit and after it should never print, so if you are seeing it on a
+    // current kernel the clamp has regressed rather than the app being noisy.
     let over = sink.lens[..recorded]
         .iter()
         .filter(|len| len.get() as usize > buf_len)
@@ -401,8 +439,8 @@ fn scan(console: &mut impl Write, ssid: &mut [u8], label: &str) {
         let _ = writeln!(
             console,
             "wifi_scan[{label}]: {over} of {recorded} recorded results reported more than the \
-             {buf_len} bytes the buffer could hold (driver.rs:296 clamps the copy, :301 does not \
-             clamp the length)"
+             {buf_len} bytes the buffer could hold — expected only on kernels before 0b229f354, \
+             where the copy was clamped and the reported length was not"
         );
     }
 
