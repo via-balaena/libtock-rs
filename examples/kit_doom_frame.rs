@@ -49,6 +49,7 @@ use core::fmt::Write;
 use libtock::alarm::Alarm;
 use libtock::buttons::Buttons;
 use libtock::console::Console;
+use libtock::gpio::{Gpio, GpioState, PullDown, PullUp};
 use libtock::display::Screen;
 use libtock::platform::ErrorCode;
 use libtock::runtime::{set_main, stack_size};
@@ -81,6 +82,11 @@ const FRAMES_PER_TRIAL: u32 = 10;
 /// everything with BUSY until it is done. Measured at 1125 ms from userspace.
 const READY_POLL_MS: u32 = 25;
 const READY_BUDGET_MS: u32 = 5_000;
+
+/// How long the app watches for a button edge before giving up, and how often
+/// it samples. 20 ms is well inside a human press and costs 750 syscalls.
+const WATCH_MS: u32 = 20_000;
+const WATCH_POLL_MS: u32 = 20;
 
 fn rgb565(r: u8, g: u8, b: u8) -> u16 {
     ((r as u16 >> 3) << 11) | ((g as u16 >> 2) << 5) | (b as u16 >> 3)
@@ -149,6 +155,66 @@ fn clear(stage: &mut [u8]) -> Result<(), ErrorCode> {
     Screen::fill(&mut black, 0x0000)?;
     let _ = stage;
     Ok(())
+}
+
+/// Reads one pin under an internal pull-down and then a pull-up. The pull has
+/// to be changed and the pin re-read: reading without changing it gives back
+/// the previous pull's value.
+fn under_pulls(pin: u32) -> Option<(bool, bool)> {
+    let p = Gpio::get_pin(pin).ok()?;
+
+    let down = {
+        let input = p.make_input::<PullDown>().ok()?;
+        let _ = Alarm::sleep_for(libtock::alarm::Milliseconds(5));
+        matches!(input.read().ok()?, GpioState::High)
+    };
+    let up = {
+        let input = p.make_input::<PullUp>().ok()?;
+        let _ = Alarm::sleep_for(libtock::alarm::Milliseconds(5));
+        matches!(input.read().ok()?, GpioState::High)
+    };
+    Some((down, up))
+}
+
+fn probe_pull<W: Write>(console: &mut W) {
+    let _ = writeln!(
+        console,
+        "kit_doom_frame: pull probe -- a pin held by an external pull-up refuses \n           an internal pull-down; a bare pin follows it.\n           pin  under_pulldown  under_pullup  verdict"
+    );
+    for (pin, what) in [
+        (14u32, "button"),
+        (15, "button"),
+        (8, "claimed free"),
+        (9, "claimed free"),
+        (10, "claimed free"),
+        (12, "claimed free"),
+        (18, "claimed free"),
+        (19, "claimed free"),
+        (20, "claimed free"),
+        (21, "claimed free"),
+        (22, "claimed free"),
+        (28, "claimed free"),
+    ] {
+        match under_pulls(pin) {
+            Some((down, up)) => {
+                let verdict = match (down, up) {
+                    (true, true) => "held high -- something is on this pin",
+                    (false, true) => "follows the pull -- nothing on this pin",
+                    (true, false) => "held low under pull-up -- unexpected",
+                    (false, false) => "reads low always -- tied to ground",
+                };
+                let _ = writeln!(
+                    console,
+                    "  {pin:>3}  {:>13}  {:>12}  {verdict} ({what})",
+                    if down { "high" } else { "low" },
+                    if up { "high" } else { "low" }
+                );
+            }
+            None => {
+                let _ = writeln!(console, "  {pin:>3}  unreadable ({what})");
+            }
+        }
+    }
 }
 
 fn main() {
@@ -268,20 +334,48 @@ fn main() {
         );
     }
 
-    // DG_GetKey's other half: the kit's buttons are the only input this board
-    // has, and four of them is enough for forward/back/turn.
+    // DG_GetKey's other half. `count()` answering at all is the driver
+    // existing; only a transition proves the pins reach userspace, so this
+    // watches for one rather than sampling once and reporting a number that
+    // a disconnected pin would also produce.
+    // Does the button hardware actually reach these pins? `count()` answering
+    // and a resting read of "not pressed" are both satisfied by a pin with
+    // nothing on it, so neither discriminates. This does, without needing
+    // anyone at the bench:
+    //
+    // The kit's buttons sit on external pull-ups. A net held by one REFUSES an
+    // internal pull-down -- the pin stays high. A pin with nothing on it
+    // follows the pull down. GP18 is on the kit's free list and is the
+    // negative control: if it does not follow the pull-down either, the
+    // method is broken and the button result means nothing.
+    probe_pull(&mut console);
+
     match Buttons::count() {
         Ok(n) => {
-            let mut pressed = 0;
-            for b in 0..n {
-                if Buttons::is_pressed(b) {
-                    pressed += 1;
-                }
-            }
             let _ = writeln!(
                 console,
-                "kit_doom_frame: {n} buttons, {pressed} held at exit -- DG_GetKey has an input"
+                "kit_doom_frame: {n} buttons. Watching {WATCH_MS} ms -- press either one.\n                   A press prints here; silence means the driver exists and the pins do not \n                   reach it, which is a different fault from having no driver."
             );
+            let mut last = [false; 8];
+            for b in 0..n.min(8) {
+                last[b as usize] = Buttons::is_pressed(b);
+            }
+            let mut waited = 0;
+            let mut edges = 0;
+            while waited < WATCH_MS {
+                for b in 0..n.min(8) {
+                    let now = Buttons::is_pressed(b);
+                    if now != last[b as usize] {
+                        let what = if now { "pressed" } else { "released" };
+                        let _ = writeln!(console, "  button {b}: {what} at {waited} ms");
+                        last[b as usize] = now;
+                        edges += 1;
+                    }
+                }
+                let _ = Alarm::sleep_for(libtock::alarm::Milliseconds(WATCH_POLL_MS));
+                waited += WATCH_POLL_MS;
+            }
+            let _ = writeln!(console, "kit_doom_frame: {edges} button edges seen");
         }
         Err(e) => {
             let _ = writeln!(console, "kit_doom_frame: no buttons: {e:?}");
