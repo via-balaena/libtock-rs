@@ -49,9 +49,14 @@ endif
 toolchain:
 	cargo -V
 
+# Our elf2tab, not the crates.io one. It adds --trailing-padding, which the
+# runner passes for Cortex-M33 targets so an app is not rounded up to a power
+# of two for an MPU constraint ARMv8-M does not have. Only cortex-m33 platforms
+# pass the flag, so a stock elf2tab still builds every other board -- but a
+# stock one will reject the flag outright, so this is what `make setup` gets.
 .PHONY: setup
 setup: setup-qemu toolchain
-	cargo install elf2tab
+	cargo install --git https://github.com/via-balaena/elf2tab --branch master elf2tab
 
 # Sets up QEMU in the tock/ directory. We use Tock's QEMU which may contain
 # patches to better support boards that Tock supports.
