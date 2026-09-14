@@ -73,9 +73,18 @@ const ZONE_KIB: usize = 222;
 const READY_POLL_MS: u32 = 25;
 const READY_BUDGET_MS: u32 = 5_000;
 
-// Doom's own, from doomkeys.h and m_controls.c's defaults.
-const KEY_FIRE: u8 = 0x80 + 0x1d; // KEY_RCTRL
-const KEY_USE: u8 = b' ';
+// Doom's own, from doomkeys.h -- all six looked up there, none recalled.
+//
+// doomgeneric does NOT use vanilla Doom's bindings for these two. It defines
+// dedicated codes, and m_controls.c's `key_fire = KEY_FIRE` resolves to them:
+//
+//     #define KEY_USE   0xa2
+//     #define KEY_FIRE  0xa3
+//
+// Filling in KEY_RCTRL (0x9d) and space from what vanilla Doom uses got the
+// buttons silently ignored while the arrows, which were looked up, worked.
+const KEY_FIRE: u8 = 0xa3;
+const KEY_USE: u8 = 0xa2;
 const KEY_UP: u8 = 0xad;
 const KEY_DOWN: u8 = 0xaf;
 const KEY_LEFT: u8 = 0xac;
@@ -86,8 +95,17 @@ const KEY_RIGHT: u8 = 0xae;
 const KEYS: [u8; 6] = [KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_FIRE, KEY_USE];
 
 /// Joystick axes. GP26 is ADC0 and GP27 is ADC1, both confirmed rail to rail.
-const AXIS_MOVE: u32 = 0;
-const AXIS_TURN: u32 = 1;
+///
+/// THE STICK IS MOUNTED 90 DEGREES CLOCKWISE on this kit, reported from the
+/// bench: pushing it right read as forward. So channel 0 is the HORIZONTAL
+/// axis here and channel 1 is the vertical one, not the other way round.
+///
+/// That also settles an apparent contradiction in the pin map, which records
+/// "held the stick down, GP26 went low". Both are true: the board was held a
+/// quarter turn differently when it was probed, so that "down" and this
+/// "left" are the same physical direction.
+const AXIS_MOVE: u32 = 1;
+const AXIS_TURN: u32 = 0;
 
 /// The stick rests near mid-scale and the converter is 16-bit. A quarter of
 /// full travel either way is a deadzone wide enough that a stick which does
@@ -95,10 +113,13 @@ const AXIS_TURN: u32 = 1;
 const AXIS_LOW: u16 = 16_384;
 const AXIS_HIGH: u16 = 49_152;
 
-/// Set if the stick turns out to be wired the other way up. Which way GP26
-/// increases was never measured -- only that holding the stick DOWN pulled the
-/// pin low -- so this is the one thing here taken on inference rather than
-/// measurement, and it is a constant so that being wrong costs one edit.
+/// Set if an axis runs the other way.
+///
+/// Turn is settled: right reads high, which is what the bench saw. Which sign
+/// of the vertical axis is "forward" is NOT settled -- a quarter turn swaps
+/// the axes and may or may not flip one, and nothing has measured which. The
+/// app prints both raw values, so the next run with the stick held forward
+/// answers it rather than a coin toss.
 const INVERT_MOVE: bool = false;
 const INVERT_TURN: bool = false;
 
@@ -179,8 +200,12 @@ fn stack_used() -> (usize, usize) {
 
 fn report_budget<W: Write>(console: &mut W) {
     // SAFETY: single-threaded read of values the input path writes.
-    let axes = unsafe { AXIS_RAW };
-    let _ = writeln!(console, "doom: joystick move={} turn={}", axes[0], axes[1]);
+    let (raw, lo, hi) = unsafe { (AXIS_RAW, AXIS_MIN, AXIS_MAX) };
+    let _ = writeln!(
+        console,
+        "doom: stick move={} [{}..{}]  turn={} [{}..{}]  (ch1 vertical, ch0 horizontal)",
+        raw[0], lo[0], hi[0], raw[1], lo[1], hi[1]
+    );
     let (used, total) = stack_used();
     let (mut hused, mut hpeak) = (0usize, 0usize);
     let (mut calls, mut dropped) = (0u32, 0u32);
@@ -223,7 +248,29 @@ static mut STAGE: [u8; STAGE_BYTES] = [0; STAGE_BYTES];
 static mut WANT: [bool; 6] = [false; 6];
 static mut TOLD: [bool; 6] = [false; 6];
 static mut IN_BURST: bool = false;
+/// Last reading per axis, and the extremes ever seen.
+///
+/// The extremes are the point. A timed console capture only answers if it
+/// happens to overlap with someone holding the stick, which is a property of
+/// the timing rather than of the hardware; a high-water and low-water mark
+/// answers whenever it is read. `u16::MAX`/0 as the initial pair means
+/// "nothing seen yet" reads as an impossible range rather than as centre.
 static mut AXIS_RAW: [u16; 2] = [0; 2];
+static mut AXIS_MIN: [u16; 2] = [u16::MAX; 2];
+static mut AXIS_MAX: [u16; 2] = [0; 2];
+
+fn note_axis(i: usize, v: u16) {
+    // SAFETY: single-threaded, and the input path is the only writer.
+    unsafe {
+        AXIS_RAW[i] = v;
+        if v < AXIS_MIN[i] {
+            AXIS_MIN[i] = v;
+        }
+        if v > AXIS_MAX[i] {
+            AXIS_MAX[i] = v;
+        }
+    }
+}
 static mut FRAMES: u32 = 0;
 
 fn rgb565(r: u8, g: u8, b: u8) -> u16 {
@@ -258,15 +305,13 @@ fn sample_input() -> [bool; 6] {
     if let Ok(v) = Adc::read_single_sample_sync(AXIS_MOVE) {
         fwd = v > AXIS_HIGH;
         back = v < AXIS_LOW;
-        // SAFETY: single-threaded; read back by the periodic report so the
-        // axis wiring can be checked against what the stick is doing.
-        unsafe { AXIS_RAW[0] = v }
+        note_axis(0, v);
     }
     let (mut left, mut right) = (false, false);
     if let Ok(v) = Adc::read_single_sample_sync(AXIS_TURN) {
         right = v > AXIS_HIGH;
         left = v < AXIS_LOW;
-        unsafe { AXIS_RAW[1] = v }
+        note_axis(1, v);
     }
     if INVERT_MOVE {
         core::mem::swap(&mut fwd, &mut back);
