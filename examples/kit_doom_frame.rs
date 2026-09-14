@@ -49,8 +49,8 @@ use core::fmt::Write;
 use libtock::alarm::Alarm;
 use libtock::buttons::Buttons;
 use libtock::console::Console;
-use libtock::gpio::{Gpio, GpioState, PullDown, PullUp};
 use libtock::display::Screen;
+use libtock::gpio::{Gpio, GpioState, PullDown, PullUp};
 use libtock::platform::ErrorCode;
 use libtock::runtime::{set_main, stack_size};
 
