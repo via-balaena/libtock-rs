@@ -46,7 +46,7 @@ set_main! {main}
 /// Doom recurses through the BSP, so this is not a formality. Not yet measured
 /// -- 32 KiB is a guess with room in it, and the first thing to shrink if the
 /// zone needs more.
-stack_size! {0x8000}
+stack_size! {0x2000}
 
 const DOOM_W: usize = 320;
 const DOOM_H: usize = 200;
@@ -62,10 +62,10 @@ const STAGE_BYTES: usize = DOOM_W * BAND * 2;
 
 /// What the shim's allocator hands out. Doom's zone takes nearly all of it in
 /// one call, so this and `ZONE_KIB` move together.
-const HEAP_BYTES: usize = 230 * 1024;
+const HEAP_BYTES: usize = 256 * 1024;
 /// Passed to Doom as `-kb`. Leaves the heap a few KiB for the handful of
 /// strings Doom duplicates outside the zone.
-const ZONE_KIB: usize = 226;
+const ZONE_KIB: usize = 222;
 
 /// The panel spends over a second in its init sequence and answers BUSY until
 /// it is done. Measured at 1225 ms from userspace.
@@ -112,10 +112,61 @@ pub extern "C" fn tock_ticks_ms() -> u32 {
     Alarm::get_milliseconds().unwrap_or(0) as u32
 }
 
+/// The shim's own accounting, which nothing has read back until now.
+extern "C" {
+    fn tock_alloc_stats(used: *mut usize, peak: *mut usize,
+                        calls: *mut u32, dropped: *mut u32);
+}
+
+/// Deepest the stack has been, by painting it and looking for the paint.
+///
+/// `stack_size!` puts the stack in STACK_MEMORY and it grows DOWN from the
+/// end, so unused space is at the START of the array. Painting stops short of
+/// the live frame; anything below the first surviving byte was reached.
+const PAINT: u8 = 0xAA;
+
+fn paint_stack() {
+    let base = addr_of_mut!(STACK_MEMORY) as usize;
+    let here = &base as *const _ as usize;
+    // Leave a wide margin below the current frame: this function's own
+    // locals, and everything it returns into, live above it.
+    let safe = here.saturating_sub(base).saturating_sub(512);
+    // SAFETY: writing only below the live frame, in the app's own stack array.
+    unsafe {
+        let p = addr_of_mut!(STACK_MEMORY) as *mut u8;
+        for i in 0..safe {
+            p.add(i).write_volatile(PAINT);
+        }
+    }
+}
+
+fn stack_used() -> (usize, usize) {
+    let total = unsafe { (*addr_of_mut!(STACK_MEMORY)).len() };
+    // SAFETY: reading the app's own stack array.
+    let p = addr_of_mut!(STACK_MEMORY) as *const u8;
+    let mut untouched = 0;
+    while untouched < total && unsafe { p.add(untouched).read_volatile() } == PAINT {
+        untouched += 1;
+    }
+    (total - untouched, total)
+}
+
+fn report_budget<W: Write>(console: &mut W) {
+    let (used, total) = stack_used();
+    let (mut hused, mut hpeak) = (0usize, 0usize);
+    let (mut calls, mut dropped) = (0u32, 0u32);
+    // SAFETY: four out-pointers to locals, which is what the shim expects.
+    unsafe { tock_alloc_stats(&mut hused, &mut hpeak, &mut calls, &mut dropped) }
+    let _ = writeln!(console,
+        "doom: stack {used} of {total} used; heap peak {hpeak} of {HEAP_BYTES} \
+         in {calls} calls, {dropped} frees dropped");
+}
+
 #[no_mangle]
 pub extern "C" fn tock_exit(status: i32) -> ! {
     let mut console = Console::writer();
     let _ = writeln!(console, "\ndoom: exit({status})");
+    report_budget(&mut console);
     loop {
         let _ = Alarm::sleep_for(Milliseconds(1000));
     }
@@ -257,8 +308,16 @@ static mut ARG0: [u8; 5] = *b"doom\0";
 static mut ARG_IWAD: [u8; 6] = *b"-iwad\0";
 static mut ARG_WAD: [u8; 9] = *b"doom.wad\0";
 static mut ARG_KB: [u8; 4] = *b"-kb\0";
-static mut ARG_KB_N: [u8; 8] = *b"226\0\0\0\0\0";
-static mut ARGV: [*mut u8; 5] = [core::ptr::null_mut(); 5];
+static mut ARG_KB_N: [u8; 8] = *b"222\0\0\0\0\0";
+/* Straight into the map. Without this Doom starts at the title screen and
+ * wants TITLEPIC, the demo lumps and the rest of the attract loop -- none of
+ * which a WAD trimmed to one map carries, and none of which this build is
+ * for. It also makes the app match the configuration every measurement here
+ * was taken in, which was -warp 1 1. */
+static mut ARG_WARP: [u8; 6] = *b"-warp\0";
+static mut ARG_EP: [u8; 2] = *b"1\0";
+static mut ARG_MAP: [u8; 2] = *b"1\0";
+static mut ARGV: [*mut u8; 8] = [core::ptr::null_mut(); 8];
 
 fn main() {
     let mut console = Console::writer();
@@ -314,9 +373,13 @@ fn main() {
         ARGV[2] = addr_of_mut!(ARG_WAD) as *mut u8;
         ARGV[3] = addr_of_mut!(ARG_KB) as *mut u8;
         ARGV[4] = addr_of_mut!(ARG_KB_N) as *mut u8;
+        ARGV[5] = addr_of_mut!(ARG_WARP) as *mut u8;
+        ARGV[6] = addr_of_mut!(ARG_EP) as *mut u8;
+        ARGV[7] = addr_of_mut!(ARG_MAP) as *mut u8;
 
+        paint_stack();
         let _ = writeln!(console, "doom: handing over to doomgeneric_Create\n");
-        doomgeneric_Create(5, addr_of_mut!(ARGV) as *mut *mut u8);
+        doomgeneric_Create(8, addr_of_mut!(ARGV) as *mut *mut u8);
 
         let _ = writeln!(console, "\ndoom: init done, entering the frame loop");
         let start = Alarm::get_milliseconds().unwrap_or(0);
@@ -328,6 +391,7 @@ fn main() {
                 let secs = now.saturating_sub(start) as u32 / 1000;
                 let frames = core::ptr::read_volatile(addr_of_mut!(FRAMES));
                 let _ = writeln!(console, "doom: {frames} frames in {secs} s");
+                report_budget(&mut console);
                 reported = now;
             }
         }

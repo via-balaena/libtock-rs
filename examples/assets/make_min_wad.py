@@ -463,6 +463,17 @@ def main():
             stub_bytes += size - 4
         else:
             out.append((name, data[pos:pos + size]))
+    # Every lump matching a --stub prefix, kept by name and empty. Doom looks
+    # music up per level and at the title screen, and W_GetNumForName I_Errors
+    # on a name it cannot find -- so the names all have to be here, even on a
+    # build with no sound driver that will never read a byte of them.
+    if stubs:
+        for name, pos, size in dirents:
+            if name.startswith(stubs) and name not in {n for n, _ in out}:
+                out.append((name, b"\0\0\0\0"))
+                stubbed += 1
+                stub_bytes += max(0, size - 4)
+
     out.append((args.rename, b""))
     for name in MAP_LUMPS:
         for i in range(mapstart + 1, mapstart + 12):
@@ -510,6 +521,7 @@ def main():
 
         blank = dummy_patch()
         out.append(("S_START", b""))
+        seen_blank = set()
         for i, (name, pos, size) in enumerate(dirents):
             if ns.get(i) != "S":
                 continue
@@ -517,8 +529,16 @@ def main():
                 out.append((name, data[pos:pos + size]))
                 sprite_bytes += size
                 kept_sprites += 1
-            else:
-                out.append((name, blank))
+            elif name[:4] not in seen_blank:
+                # ONE lump for a sprite that cannot be spawned, not one per
+                # frame. R_InitSpriteDefs needs a sprite to have at least one
+                # lump and its frames to be consistent; frame A rotation 0 is
+                # the smallest set that satisfies both, and every other lump
+                # for this sprite is a directory entry Doom would carry for
+                # nothing. The entry costs 28 bytes of lumpinfo in RAM, which
+                # is the binding constraint on this board.
+                seen_blank.add(name[:4])
+                out.append((name[:4] + "A0", blank))
                 sprite_bytes += len(blank)
                 dummied += 1
         out.append(("S_END", b""))

@@ -68,6 +68,7 @@ fn build_doom() {
     }
     println!("cargo:rerun-if-changed={}", builder.display());
     println!("cargo:rerun-if-env-changed=DOOM_SRC");
+    println!("cargo:rerun-if-env-changed=DOOM_SCAFFOLD");
 }
 
 fn watch(dir: &Path) {
