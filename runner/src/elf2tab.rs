@@ -28,6 +28,23 @@ fn get_platform_architecture(platform: &str) -> Option<&'static str> {
     }
 }
 
+// How the total TBF size must be padded, when elf2tab's own per-architecture
+// default is wrong for the target.
+//
+// elf2tab pads every ARM TBF to a power of two, because an ARMv7-M MPU region
+// must be a power of two in size and naturally aligned. ARMv8-M regions are
+// 32-byte granular instead -- Tock spells the same 32 as
+// CORTEXM_MIN_REGION_SIZE in arch/cortex-m33/src/mpu_v8m.rs, the MPU driver
+// these boards use -- so a Cortex-M33 app would otherwise pay for a constraint
+// its MPU does not have. On a Pico 2 W that caps an app at 2 MiB out of a
+// 3520K region.
+fn get_trailing_padding(architecture: &str) -> Option<&'static str> {
+    match architecture {
+        "cortex-m33" => Some("32"),
+        _ => None,
+    }
+}
+
 // Converts the ELF file specified on the command line into TBF and TAB files,
 // and returns the paths to those files.
 pub fn convert_elf(cli: &Cli, platform: &str) -> OutFiles {
@@ -77,6 +94,9 @@ pub fn convert_elf(cli: &Cli, platform: &str) -> OutFiles {
         "--stack".as_ref(), stack_size.as_ref(),
         format!("{},{}", elf.to_str().unwrap(), architecture).as_ref(),
     ]);
+    if let Some(multiple) = get_trailing_padding(architecture) {
+        command.args(["--trailing-padding", multiple]);
+    }
     if cli.verbose {
         command.arg("-v");
         println!("elf2tab command: {command:?}");
