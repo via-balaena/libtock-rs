@@ -106,8 +106,13 @@
 //! consequences for anyone building a frame blit on top of this.
 //!
 //! The referent above is eighteen months older than the kernel on the bench --
-//! this repo pins `b3234a172` from 2024-04-05 -- so a solid blue left half is a
-//! finding rather than a mistake. The two trees are known to have diverged
+//! this repo pins `b3234a172` from 2024-04-05 -- but the kernel side has since
+//! confirmed the same three lines in their own tree, at `:235`, `:271` and
+//! `:440`, unchanged across that whole span. **So a solid blue left half is now
+//! a surprise rather than merely a finding**, and the prediction is about the
+//! kernel actually on the bench rather than about an old pin.
+//!
+//! The two trees are known to have diverged
 //! already: that kernel's `ScreenPixelFormat` is
 //! `Mono, RGB_233, RGB_565, RGB_888, ARGB_8888` (`kernel/src/hil/screen.rs:98-114`)
 //! where the bench kernel has `Mono, RGB_332, RGB_565, RGB_888, BGRA_8888,
@@ -117,6 +122,38 @@
 //!
 //! The strip is drawn on a black ground so that undrawn rows are unambiguously
 //! undrawn rather than whatever the panel happened to be holding.
+//!
+//! # BUSY during init, and why the retry is here rather than in the wrapper
+//!
+//! The first run of this app, 2026-09-14, got the geometry line right and then
+//! **eleven BUSY answers in a row, the first call included.** The cause is not
+//! this app and not the wrapper: `st77xx` answers BUSY while its `Status` is
+//! anything but `Idle`, and its init sequence -- SWRESET 150 ms, SLPOUT 255 ms,
+//! INVON 120 ms, DISPLAY_ON 100 ms -- runs north of 600 ms after boot. Eleven
+//! syscalls fit inside that window with room to spare.
+//!
+//! **A kernel client waits for `screen_is_ready()`. An app cannot.** The
+//! capsule implements readiness and uses it to run queued commands, but nothing
+//! surfaces "the screen has finished initialising" through the syscall
+//! interface. That is a real gap and it is the kernel side's; retrying on BUSY
+//! is the workaround, not the fix.
+//!
+//! It lives in this app rather than in `apis/display/screen` deliberately.
+//! Putting a retry loop in the wrapper would change what every screen call in
+//! the crate does about time, which is a PR with a description attached. Here
+//! it changes one example.
+//!
+//! **How long the wait actually is has never been measured from userspace**, so
+//! the app reports it: the total time spent absorbing BUSY is printed at the
+//! end. That number is the size of the gap, stated in the units an app
+//! experiences it in.
+//!
+//! The first run also found a kernel defect that would have made this retry
+//! useless -- `enqueue_command` left `pending_command` set when the screen
+//! refused a command, so the first BUSY wedged the app's access for the life of
+//! the process and every later call answered BUSY from the queue rather than
+//! from the driver. Fixed kernel-side in `c45dd2150`. A retry against the
+//! unfixed kernel would have spun forever and looked like a dead panel.
 //!
 //! # What `Ok` means here, which is less than it looks
 //!
@@ -187,6 +224,13 @@ const BARS: [(u16, &str); 8] = [
 /// two bytes each, on a 480-wide panel. If the reported geometry needs more
 /// than this, the control is skipped rather than silently truncated.
 const CONTROL_MAX: usize = 240 * 40 * 2;
+
+/// How long to sleep between retries of a call the panel refused with BUSY,
+/// and how long to keep doing that before giving up. The init sequence this is
+/// absorbing is upwards of 600 ms; the budget is generous because the cost of
+/// being wrong is a run that reports a dead panel.
+const READY_POLL_MS: u32 = 25;
+const READY_BUDGET_MS: u32 = 5_000;
 
 fn main() {
     let mut console = Console::writer();
@@ -282,22 +326,44 @@ fn main() {
     );
 
     let mut failures = 0u32;
+    let mut waited_total = 0u32;
+    let mut waited_first = 0u32;
 
     for (index, (colour, name)) in BARS.iter().enumerate() {
         let x = bar_w * index as u32;
-        if let Err(e) = fill_rect(x, 0, bar_w, bars_h, *colour) {
+        let (result, waited) = fill_rect(x, 0, bar_w, bars_h, *colour);
+        if index == 0 {
+            waited_first = waited;
+        }
+        waited_total += waited;
+        if let Err(e) = result {
             let _ = writeln!(console, "kit_screen_bars: fill {name}: {e:?}\r");
             failures += 1;
         }
     }
 
+    if waited_first > 0 {
+        let _ = writeln!(
+            console,
+            "kit_screen_bars: the first call waited {waited_first} ms for the \
+             panel to leave\r\n\
+             \x20 its init sequence -- that is the size of the readiness gap, \
+             measured from\r\n\
+             \x20 userspace, where no syscall reports it.\r"
+        );
+    }
+
     // Black ground, so an undrawn row of the strip is unambiguously undrawn.
-    if let Err(e) = fill_rect(0, strip_y, width, strip_h, BLACK) {
+    let (grounded, waited) = fill_rect(0, strip_y, width, strip_h, BLACK);
+    waited_total += waited;
+    if let Err(e) = grounded {
         let _ = writeln!(console, "kit_screen_bars: fill strip ground: {e:?}\r");
         failures += 1;
     }
 
-    match write_rect_by_rows(0, strip_y, left_w, strip_h, BLUE_BYTES) {
+    let (left, waited) = write_rect_by_rows(0, strip_y, left_w, strip_h, BLUE_BYTES);
+    waited_total += waited;
+    match left {
         Ok(calls) => {
             let _ = writeln!(
                 console,
@@ -326,7 +392,10 @@ fn main() {
         for pair in buffer[..control_bytes].chunks_exact_mut(2) {
             pair.copy_from_slice(&WHITE_BYTES);
         }
-        match write_rect_once(left_w, strip_y, right_w, strip_h, &buffer[..control_bytes]) {
+        let (right, waited) =
+            write_rect_once(left_w, strip_y, right_w, strip_h, &buffer[..control_bytes]);
+        waited_total += waited;
+        match right {
             Ok(()) => {
                 let _ = writeln!(
                     console,
@@ -340,6 +409,15 @@ fn main() {
             }
         }
     }
+
+    let _ = writeln!(
+        console,
+        "kit_screen_bars: {waited_total} ms total spent retrying calls the \
+         panel refused\r\n\
+         \x20 with BUSY. Anything beyond the first call's wait means BUSY \
+         arrived after\r\n\
+         \x20 the panel was up, which would be a different finding.\r"
+    );
 
     if failures == 0 {
         let _ = writeln!(
@@ -366,44 +444,80 @@ fn main() {
     }
 }
 
+/// Runs one drawing call, absorbing the BUSY the panel returns for as long as
+/// its init sequence lasts. Returns the outcome and how long it waited, so the
+/// size of that window is reported rather than merely tolerated.
+///
+/// Only BUSY is retried. Every other error is the answer.
+fn retry_busy(mut call: impl FnMut() -> Result<(), ErrorCode>) -> (Result<(), ErrorCode>, u32) {
+    let mut waited = 0;
+    loop {
+        match call() {
+            Err(ErrorCode::Busy) if waited < READY_BUDGET_MS => {
+                let _ = Alarm::sleep_for(Milliseconds(READY_POLL_MS));
+                waited += READY_POLL_MS;
+            }
+            result => return (result, waited),
+        }
+    }
+}
+
 /// One solid rectangle, colour chosen as a `u16` so the wrapper picks the byte
-/// order.
-fn fill_rect(x: u32, y: u32, w: u32, h: u32, colour: u16) -> Result<(), ErrorCode> {
-    Screen::set_write_frame(x, y, w, h)?;
-    let mut pixel = [0u8; 2];
-    Screen::fill(&mut pixel, colour)
+/// order. The frame and the fill retry together: a frame the panel refused has
+/// to be set again before the fill it belongs to.
+fn fill_rect(x: u32, y: u32, w: u32, h: u32, colour: u16) -> (Result<(), ErrorCode>, u32) {
+    retry_busy(|| {
+        Screen::set_write_frame(x, y, w, h)?;
+        let mut pixel = [0u8; 2];
+        Screen::fill(&mut pixel, colour)
+    })
 }
 
 /// One rectangle built from the caller's own bytes, a row per `write` call.
 /// Returns the call count, so a capsule that restarts at the frame origin can
 /// be told from one that continues -- by comparing the count against how many
 /// rows actually painted.
-fn write_rect_by_rows(x: u32, y: u32, w: u32, h: u32, pixel: [u8; 2]) -> Result<u32, ErrorCode> {
-    Screen::set_write_frame(x, y, w, h)?;
-
+fn write_rect_by_rows(
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    pixel: [u8; 2],
+) -> (Result<u32, ErrorCode>, u32) {
     // One row. 480 is the widest panel this app expects, and a half-width row
     // of it is 240 pixels.
     let mut row = [0u8; 240 * 2];
     let row_bytes = (w as usize) * 2;
     if row_bytes > row.len() {
-        return Err(ErrorCode::Size);
+        return (Err(ErrorCode::Size), 0);
     }
     for pair in row[..row_bytes].chunks_exact_mut(2) {
         pair.copy_from_slice(&pixel);
     }
 
+    let (framed, mut waited) = retry_busy(|| Screen::set_write_frame(x, y, w, h));
+    if let Err(e) = framed {
+        return (Err(e), waited);
+    }
+
     let mut calls = 0u32;
     for _ in 0..h {
-        Screen::write(&row[..row_bytes])?;
+        let (written, spent) = retry_busy(|| Screen::write(&row[..row_bytes]));
+        waited += spent;
+        if let Err(e) = written {
+            return (Err(e), waited);
+        }
         calls += 1;
     }
-    Ok(calls)
+    (Ok(calls), waited)
 }
 
 /// One rectangle in a single `write` call -- the path a frame blit uses, where
 /// the capsule chunks the caller's buffer through its own and continues within
 /// the one syscall.
-fn write_rect_once(x: u32, y: u32, w: u32, h: u32, pixels: &[u8]) -> Result<(), ErrorCode> {
-    Screen::set_write_frame(x, y, w, h)?;
-    Screen::write(pixels)
+fn write_rect_once(x: u32, y: u32, w: u32, h: u32, pixels: &[u8]) -> (Result<(), ErrorCode>, u32) {
+    retry_busy(|| {
+        Screen::set_write_frame(x, y, w, h)?;
+        Screen::write(pixels)
+    })
 }
