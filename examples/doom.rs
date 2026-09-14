@@ -35,7 +35,10 @@
 
 use core::fmt::Write;
 use core::ptr::addr_of_mut;
-use libtock::adc::Adc;
+use core::cell::Cell;
+use libtock::adc::{ADCListener, Adc};
+use libtock::platform::{Syscalls, share};
+use libtock::runtime::TockSyscalls;
 use libtock::alarm::{Alarm, Milliseconds};
 use libtock::buttons::Buttons;
 use libtock::console::Console;
@@ -206,6 +209,20 @@ fn report_budget<W: Write>(console: &mut W) {
         "doom: stick move={} [{}..{}]  turn={} [{}..{}]  (ch1 vertical, ch0 horizontal)",
         raw[0], lo[0], hi[0], raw[1], lo[1], hi[1]
     );
+    // SAFETY: single-threaded read of values the input path writes.
+    let (presses, errs) = unsafe { (BTN_PRESSES, BTN_ERRORS) };
+    let _ = writeln!(
+        console,
+        "doom: buttons GP14={} GP15={} presses, {} driver errors",
+        presses[0], presses[1], errs
+    );
+    // SAFETY: single-threaded read of values the input path writes.
+    let (aok, aerr, alast) = unsafe { (ADC_OK, ADC_ERRORS, ADC_LAST_ERR) };
+    let _ = writeln!(
+        console,
+        "doom: adc ch1 {} ok / {} err (last {}), ch0 {} ok / {} err (last {})",
+        aok[0], aerr[0], alast[0], aok[1], aerr[1], alast[1]
+    );
     let (used, total) = stack_used();
     let (mut hused, mut hpeak) = (0usize, 0usize);
     let (mut calls, mut dropped) = (0u32, 0u32);
@@ -259,6 +276,92 @@ static mut AXIS_RAW: [u16; 2] = [0; 2];
 static mut AXIS_MIN: [u16; 2] = [u16::MAX; 2];
 static mut AXIS_MAX: [u16; 2] = [0; 2];
 
+/// Presses seen per button, and errors from the driver, since boot.
+///
+/// The same reason the axes keep watermarks: "the button does nothing" has
+/// three different causes -- the driver never says pressed, the driver errors,
+/// or Doom ignores the key -- and they look identical from the outside. A
+/// count that only rises when the DRIVER reports a press separates the first
+/// two from the third without needing to catch the moment.
+/// ADC failures, which were being thrown away.
+///
+/// `read_single_sample_sync` returns Err if the command is refused -- BUSY,
+/// say -- and `if let Ok(v)` then leaves the axis reading exactly as if the
+/// stick were centred. A converter that has stopped answering and a stick
+/// nobody is touching produce the same numbers, which is why the stick going
+/// dead looked like nothing at all.
+static mut ADC_ERRORS: [u32; 2] = [0; 2];
+static mut ADC_LAST_ERR: [u16; 2] = [0; 2];
+static mut ADC_OK: [u32; 2] = [0; 2];
+
+static mut BTN_PRESSES: [u32; 2] = [0; 2];
+static mut BTN_ERRORS: u32 = 0;
+static mut BTN_LAST: [bool; 2] = [false; 2];
+
+fn read_button(i: u32) -> bool {
+    let now = match Buttons::read(i) {
+        Ok(state) => state == libtock::buttons::ButtonState::Pressed,
+        Err(_) => {
+            // SAFETY: single-threaded, only writer.
+            unsafe { BTN_ERRORS += 1 }
+            return false;
+        }
+    };
+    // SAFETY: single-threaded, only writer.
+    unsafe {
+        let k = i as usize;
+        if now && !BTN_LAST[k] {
+            BTN_PRESSES[k] += 1;
+        }
+        BTN_LAST[k] = now;
+    }
+    now
+}
+
+/// How many times to poll for a conversion before giving up on it.
+///
+/// Each poll is one non-blocking yield, so this is roughly a millisecond --
+/// far longer than an RP2350 conversion, and short enough that giving up
+/// costs one stale axis reading rather than a frame.
+const ADC_POLL_LIMIT: u32 = 2_000;
+
+/// Read one axis WITHOUT a wait that cannot end.
+///
+/// `Adc::read_single_sample_sync` spins on `yield_wait()` until the callback
+/// arrives, with no bound and no way out. Putting that in a game loop means a
+/// single conversion whose upcall never comes stops Doom forever -- no error,
+/// no output, nothing on the console. That is exactly what wedged it on the
+/// bench: the process stayed Yielded, syscalls ticked over at about twelve a
+/// second, and no frame was ever drawn again.
+///
+/// A frame loop must not contain a wait that cannot end. This polls a bounded
+/// number of times and gives up; `share::scope` unsubscribes on the way out,
+/// so a late upcall is dropped rather than delivered into a dead listener, and
+/// the caller carries on with the previous reading.
+fn read_axis_bounded(channel: u32) -> Result<u16, libtock::platform::ErrorCode> {
+    let sample: Cell<Option<u16>> = Cell::new(None);
+    let listener = ADCListener(|v| sample.set(Some(v)));
+    share::scope(|subscribe| {
+        Adc::register_listener(&listener, subscribe)?;
+        Adc::read_single_sample(channel)?;
+        for _ in 0..ADC_POLL_LIMIT {
+            if sample.get().is_some() {
+                break;
+            }
+            TockSyscalls::yield_no_wait();
+        }
+        sample.get().ok_or(libtock::platform::ErrorCode::Busy)
+    })
+}
+
+fn note_adc_error(i: usize, e: libtock::platform::ErrorCode) {
+    // SAFETY: single-threaded, only writer.
+    unsafe {
+        ADC_ERRORS[i] += 1;
+        ADC_LAST_ERR[i] = e as u16;
+    }
+}
+
 fn note_axis(i: usize, v: u16) {
     // SAFETY: single-threaded, and the input path is the only writer.
     unsafe {
@@ -302,16 +405,25 @@ fn sample_input() -> [bool; 6] {
     let mut want = [false; 6];
 
     let (mut fwd, mut back) = (false, false);
-    if let Ok(v) = Adc::read_single_sample_sync(AXIS_MOVE) {
-        fwd = v > AXIS_HIGH;
-        back = v < AXIS_LOW;
-        note_axis(0, v);
+    match read_axis_bounded(AXIS_MOVE) {
+        Ok(v) => {
+            fwd = v > AXIS_HIGH;
+            back = v < AXIS_LOW;
+            note_axis(0, v);
+            // SAFETY: single-threaded, only writer.
+            unsafe { ADC_OK[0] += 1 }
+        }
+        Err(e) => note_adc_error(0, e),
     }
     let (mut left, mut right) = (false, false);
-    if let Ok(v) = Adc::read_single_sample_sync(AXIS_TURN) {
-        right = v > AXIS_HIGH;
-        left = v < AXIS_LOW;
-        note_axis(1, v);
+    match read_axis_bounded(AXIS_TURN) {
+        Ok(v) => {
+            right = v > AXIS_HIGH;
+            left = v < AXIS_LOW;
+            note_axis(1, v);
+            unsafe { ADC_OK[1] += 1 }
+        }
+        Err(e) => note_adc_error(1, e),
     }
     if INVERT_MOVE {
         core::mem::swap(&mut fwd, &mut back);
@@ -324,8 +436,8 @@ fn sample_input() -> [bool; 6] {
     want[1] = back;
     want[2] = left;
     want[3] = right;
-    want[4] = Buttons::is_pressed(1);
-    want[5] = Buttons::is_pressed(0);
+    want[4] = read_button(1);
+    want[5] = read_button(0);
     want
 }
 
