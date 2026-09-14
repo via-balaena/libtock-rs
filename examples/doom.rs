@@ -57,15 +57,15 @@ const ORIGIN_Y: u32 = (PANEL_H - DOOM_H as u32) / 2;
 
 /// Rows per blit. 50 was the fastest band `kit_doom_frame` measured and costs
 /// 32,000 bytes of staging; it divides 200 exactly, so no band is short.
-const BAND: usize = 50;
+const BAND: usize = 25;
 const STAGE_BYTES: usize = DOOM_W * BAND * 2;
 
 /// What the shim's allocator hands out. Doom's zone takes nearly all of it in
 /// one call, so this and `ZONE_KIB` move together.
-const HEAP_BYTES: usize = 320 * 1024;
+const HEAP_BYTES: usize = 264 * 1024;
 /// Passed to Doom as `-kb`. Leaves the heap a few KiB for the handful of
 /// strings Doom duplicates outside the zone.
-const ZONE_KIB: usize = 316;
+const ZONE_KIB: usize = 260;
 
 /// The panel spends over a second in its init sequence and answers BUSY until
 /// it is done. Measured at 1225 ms from userspace.
@@ -257,7 +257,7 @@ static mut ARG0: [u8; 5] = *b"doom\0";
 static mut ARG_IWAD: [u8; 6] = *b"-iwad\0";
 static mut ARG_WAD: [u8; 9] = *b"doom.wad\0";
 static mut ARG_KB: [u8; 4] = *b"-kb\0";
-static mut ARG_KB_N: [u8; 8] = *b"316\0\0\0\0\0";
+static mut ARG_KB_N: [u8; 8] = *b"260\0\0\0\0\0";
 static mut ARGV: [*mut u8; 5] = [core::ptr::null_mut(); 5];
 
 fn main() {
