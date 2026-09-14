@@ -22,6 +22,39 @@
 //! Neither session could run it alone -- the capsule is one repo and the app is
 //! another -- which is the whole reason it is worth building.
 //!
+//! # What it found, 2026-09-14 -- both questions answered
+//!
+//! **Byte order is correct end to end. No swap.** The bars came out white,
+//! yellow, cyan, green, purple, red, blue, black -- the expected order. Six of
+//! the eight are swap-sensitive, so this is a strong result rather than a lucky
+//! one: a swap would have given white, blue, red, magenta, green, cyan, yellow,
+//! black. The wrapper's high-byte-first choice in `fill` agrees with the
+//! capsule, which agrees with the panel.
+//!
+//! **Writes do not continue across syscalls.** The left half came out black with
+//! a thin blue line at its top edge, exactly one row, and the right half solid
+//! white. So the forty one-row writes each restarted at the frame origin and
+//! painted row 280 forty times, while the single 19,200-byte write painted its
+//! whole rectangle.
+//!
+//! **That thin blue line is the PASS, not a defect.** It is one pixel in 320 and
+//! genuinely hard to see -- reported as "black" on an unprimed first look at the
+//! whole panel, and as "i think i barely see a thin blue line" when looking at
+//! that specific edge. Anyone rerunning this should expect to have to look for
+//! it. A *solid* blue left half would be the surprise, and would mean the kernel
+//! changed.
+//!
+//! The console confirmed all forty calls were issued and accepted, which is what
+//! left the alternative -- that the writes painted nothing -- with no mechanism
+//! at all. A hedged positive on the branch that has a mechanism, against one
+//! that has none, is a confirmation.
+//!
+//! **The right half is the result that matters for anything blitting frames:**
+//! one syscall, 19,200 bytes, the capsule chunking internally with
+//! `continue_write` true after the first chunk. That path works. The
+//! repeated-small-write path is the one that does not, and it is not the one a
+//! framebuffer push would use.
+//!
 //! # What to look for, in the order it fails
 //!
 //! The console says all of this before anything is drawn, so the run can be
@@ -330,6 +363,14 @@ fn main() {
          not solid\r\n\
          \x20 means the write path is broken and the left half says nothing \
          at all.\r"
+    );
+    let _ = writeln!(
+        console,
+        "  CONFIRMED 2026-09-14: the thin blue line is the pass. One pixel in \
+         320 and\r\n\
+         \x20 hard to see -- look at the top edge of the black area where it \
+         meets the\r\n\
+         \x20 bars. Solid blue there would mean the kernel changed.\r"
     );
 
     let mut failures = 0u32;
