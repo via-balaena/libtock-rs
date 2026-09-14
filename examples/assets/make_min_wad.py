@@ -45,6 +45,8 @@ or `I_Error`s outright when the end lands before the start. So a kept range is
 kept whole and in its original relative order.
 """
 import argparse
+import os
+import re
 import struct
 import sys
 
@@ -61,8 +63,6 @@ def parse_animdefs(engine):
     START name existing and then requires the END name, so a kept group has to
     be kept whole.
     """
-    import os
-    import re
     src = open(os.path.join(os.path.expanduser(engine), "p_spec.c")).read()
     body = re.search(r"animdef_t\s+animdefs\[\]\s*=\s*\{(.*?)\n\};", src, re.S)
     if not body:
@@ -78,28 +78,169 @@ def parse_animdefs(engine):
 
 
 def parse_switchlist(engine, episode):
-    """alphSwitchList[] out of p_switch.c.
+    """alphSwitchList[] out of p_switch.c, as a list of (on, off) pairs.
 
-    P_InitSwitchList calls R_TextureNumForName -- which I_Errors -- on BOTH
-    halves of every pair whose episode is <= the current one, whether or not
-    the map uses them. So these are required by the code, not by the map.
+    P_InitSwitchList used to call R_TextureNumForName -- which I_Errors -- on
+    both halves of every pair for the episode, whether or not the map used
+    them, so a one-map WAD had to carry all 38. It now skips a pair it cannot
+    find, so only the pairs the map actually references are kept -- but BOTH
+    halves of those, because a switch that cannot toggle is worse than one
+    that is not there.
     """
-    import os
-    import re
     src = open(os.path.join(os.path.expanduser(engine), "p_switch.c")).read()
     body = re.search(r"switchlist_t\s+alphSwitchList\[\]\s*=\s*\{(.*?)\n\};", src, re.S)
     if not body:
         sys.exit("could not find alphSwitchList[] in p_switch.c")
-    need = set()
+    pairs = []
     for line in body.group(1).splitlines():
         m = re.match(r'\s*\{\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*(\d+)', line)
         # episode 0 terminates the table -- P_InitSwitchList stops there.
         if m and 1 <= int(m.group(3)) <= episode:
-            need.add(m.group(1).upper())
-            need.add(m.group(2).upper())
-    if not need:
+            pairs.append((m.group(1).upper(), m.group(2).upper()))
+    if not pairs:
         sys.exit("alphSwitchList[] parsed to nothing")
-    return need
+    return pairs
+
+
+def parse_enum(src, typename):
+    """A C enum's members in order, as name -> index."""
+    m = re.search(r"typedef\s+enum\s*\{(.*?)\}\s*" + typename + r"\s*;", src, re.S)
+    if not m:
+        sys.exit(f"could not find enum {typename}")
+    names = []
+    for raw in m.group(1).split(","):
+        raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.S)
+        raw = re.sub(r"//.*", "", raw)
+        name = raw.strip()
+        if name:
+            names.append(name.split("=")[0].strip())
+    return {n: i for i, n in enumerate(names)}
+
+
+def parse_actor_tables(engine):
+    """Doom's state machine, out of info.c and info.h.
+
+    Returns (state_sprite, state_next, mobjs) where the first two are indexed
+    by state number and `mobjs` is a list of dicts with `doomednum` and every
+    state field, in mobjtype order.
+
+    A sprite name needs no lookup: the `spritenum_t` members are SPR_ plus the
+    four-character lump prefix, and sprnames[] repeats the same strings. That
+    correspondence is checked below rather than assumed.
+    """
+    base = os.path.expanduser(engine)
+    info_h = open(os.path.join(base, "info.h")).read()
+    info_c = open(os.path.join(base, "info.c")).read()
+
+    statenum = parse_enum(info_h, "statenum_t")
+
+    # Check the SPR_ convention against sprnames[] before relying on it.
+    spr = parse_enum(info_h, "spritenum_t")
+    m = re.search(r"sprnames\[\]\s*=\s*\{(.*?)\};", info_c, re.S)
+    if not m:
+        sys.exit("could not find sprnames[]")
+    sprnames = re.findall(r'"(\w+)"', m.group(1))
+    for name, i in spr.items():
+        if name == "NUMSPRITES":
+            continue
+        if i < len(sprnames) and name[4:] != sprnames[i]:
+            sys.exit(f"SPR_ convention broken: {name} is not {sprnames[i]!r}")
+
+    # states[]: {SPR_XXX, frame, tics, {action}, S_NEXT, misc1, misc2},
+    m = re.search(r"states\[NUMSTATES\]\s*=\s*\{(.*?)\n\};", info_c, re.S)
+    if not m:
+        sys.exit("could not find states[]")
+    entries = re.findall(
+        r"\{\s*(SPR_\w+)\s*,[^,]*,[^,]*,\s*\{[^}]*\}\s*,\s*(S_\w+)", m.group(1))
+    if len(entries) < 900:
+        sys.exit(f"states[] parsed to only {len(entries)} entries")
+    state_sprite = [e[0][4:] for e in entries]
+    state_next = [statenum.get(e[1], 0) for e in entries]
+
+    # mobjinfo[]: one brace-delimited block per type, fields in struct order.
+    m = re.search(r"mobjinfo\[NUMMOBJTYPES\]\s*=\s*\{(.*)\n\};", info_c, re.S)
+    if not m:
+        sys.exit("could not find mobjinfo[]")
+    STATE_FIELDS = ("spawnstate", "seestate", "painstate", "meleestate",
+                    "missilestate", "deathstate", "xdeathstate", "raisestate")
+    ORDER = ["doomednum", "spawnstate", "spawnhealth", "seestate", "seesound",
+             "reactiontime", "attacksound", "painstate", "painchance",
+             "painsound", "meleestate", "missilestate", "deathstate",
+             "xdeathstate", "deathsound", "speed", "radius", "height", "mass",
+             "damage", "activesound", "flags", "raisestate"]
+    mobjs = []
+    for block in re.findall(r"\{\s*//\s*MT_\w+(.*?)\n\s*\}", m.group(1), re.S):
+        vals = []
+        for line in block.splitlines():
+            line = re.sub(r"//.*", "", line).strip().rstrip(",").strip()
+            if line:
+                vals.append(line)
+        if len(vals) < len(ORDER):
+            continue
+        rec = dict(zip(ORDER, vals))
+        entry = {"doomednum": None, "states": []}
+        try:
+            entry["doomednum"] = int(rec["doomednum"])
+        except ValueError:
+            pass
+        for f in STATE_FIELDS:
+            v = rec.get(f, "S_NULL")
+            if v in statenum:
+                entry["states"].append(statenum[v])
+        mobjs.append(entry)
+    if len(mobjs) < 100:
+        sys.exit(f"mobjinfo[] parsed to only {len(mobjs)} entries")
+    return state_sprite, state_next, mobjs
+
+
+def parse_weapon_states(engine, statenum):
+    """weaponinfo[] out of d_items.c: the player's psprite states."""
+    src = open(os.path.join(os.path.expanduser(engine), "d_items.c")).read()
+    m = re.search(r"weaponinfo\[NUMWEAPONS\]\s*=\s*\{(.*)\n\};", src, re.S)
+    if not m:
+        sys.exit("could not find weaponinfo[]")
+    states = [statenum[n] for n in re.findall(r"\b(S_\w+)\b", m.group(1))
+              if n in statenum]
+    if not states:
+        sys.exit("weaponinfo[] parsed to no states")
+    return states
+
+
+def dummy_patch():
+    """A 1x1 patch with one empty column: valid, and draws nothing.
+
+    This is what makes sprite trimming safe. R_InitSpriteDefs walks all 138
+    sprnames and I_Errors on any with no lumps, and the renderer I_Errors on a
+    frame it cannot find -- mid-game, not at boot. Replacing the PIXELS while
+    keeping every lump NAME leaves both tables exactly the shape they were, so
+    a sprite that was trimmed by mistake is invisible rather than fatal.
+    """
+    return struct.pack("<hhhh", 1, 1, 0, 0) + struct.pack("<I", 12) + b"\xff"
+
+
+def reachable_sprites(starts, state_sprite, state_next):
+    """Every sprite on the state graph reachable from `starts`."""
+    seen, stack, out = set(), list(starts), set()
+    while stack:
+        i = stack.pop()
+        if i in seen or i < 0 or i >= len(state_sprite):
+            continue
+        seen.add(i)
+        out.add(state_sprite[i])
+        stack.append(state_next[i])
+    return out
+
+
+def map_doomednums(data, dirents, start):
+    """Every thing type the map places, from its THINGS lump."""
+    for i in range(start + 1, min(start + 12, len(dirents))):
+        name, pos, size = dirents[i]
+        if name == "THINGS":
+            return {struct.unpack("<h", data[pos + k * 10 + 6:pos + k * 10 + 8])[0]
+                    for k in range(size // 10)}
+        if name not in MAP_LUMPS:
+            break
+    return set()
 
 
 def read_wad(path):
@@ -247,6 +388,19 @@ def main():
                          "episode <= this, whatever the map uses")
     ap.add_argument("--extra", default="",
                     help="comma-separated lump names to keep as well")
+    ap.add_argument("--sky", type=int, default=1,
+                    help="keep only this episode's sky texture (default 1); "
+                         "0 keeps all four")
+    ap.add_argument("--stub", default="D_",
+                    help="comma-separated lump name PREFIXES to keep by name "
+                         "but empty. Doom looks these up and would I_Error if "
+                         "they vanished, but nothing reads the bytes: the "
+                         "default is music, on a build with no sound driver")
+    ap.add_argument("--all-sprites", action="store_true",
+                    help="keep every sprite's pixels. Without this, sprites "
+                         "the map cannot show are replaced by a 1x1 blank, "
+                         "keeping every lump NAME so R_InitSpriteDefs and the "
+                         "renderer see the tables they expect")
     ap.add_argument("--no-sprites", action="store_true",
                     help="drop the S_ namespace (Doom will not boot; for sizing only)")
     args = ap.parse_args()
@@ -263,15 +417,26 @@ def main():
     mapstart = idx[0]
 
     animdefs = parse_animdefs(args.engine)
-    switchtex = parse_switchlist(args.engine, args.episode)
+    switchpairs = parse_switchlist(args.engine, args.episode)
 
     reftex, refflats = map_references(data, dirents, mapstart)
     pnames, textures = parse_textures(data, dirents, byname)
     texnames = [t[0] for t in textures]
 
     # G_DoLoadLevel picks the sky by episode and calls R_TextureNumForName on
-    # it, so the sky a map does not reference is still required by the code.
-    skytex = {"SKY1", "SKY2", "SKY3", "SKY4"}
+    # it, so the sky a map does not reference is still required by the code --
+    # but only ONE of them is, the one for the episode that will be played.
+    # Each sky's patch is 35,080 bytes, so carrying all four costs 105,240 for
+    # three that can never be drawn. With the map renamed to E1M1 the game
+    # mode is shareware, which clamps every warp to episode 1.
+    skytex = {f"SKY{args.sky}"} if args.sky else {"SKY1", "SKY2", "SKY3", "SKY4"}
+
+    # Keep both halves of a switch pair the map uses, and neither half of one
+    # it does not: P_InitSwitchList now skips what it cannot find.
+    switchtex = set()
+    for on, off in switchpairs:
+        if on in reftex or off in reftex:
+            switchtex.update((on, off))
 
     wanted = (reftex | switchtex | skytex) & set(texnames)
     keeptex = expand_animations(wanted, texnames, True, animdefs)
@@ -284,12 +449,20 @@ def main():
     extra = [e.strip().upper() for e in args.extra.split(",") if e.strip()]
     plain = ["PLAYPAL", "COLORMAP"] + extra
 
+    stubs = tuple(p.strip().upper() for p in args.stub.split(",") if p.strip())
+    stubbed = stub_bytes = 0
+
     out = []          # (name, bytes)
     for name in plain:
         if name not in byname:
             sys.exit(f"{name}: not in source WAD")
         pos, size = byname[name]
-        out.append((name, data[pos:pos + size]))
+        if stubs and name.startswith(stubs):
+            out.append((name, b"\0\0\0\0"))
+            stubbed += 1
+            stub_bytes += size - 4
+        else:
+            out.append((name, data[pos:pos + size]))
     out.append((args.rename, b""))
     for name in MAP_LUMPS:
         for i in range(mapstart + 1, mapstart + 12):
@@ -318,13 +491,36 @@ def main():
             out.append((name, data[pos:pos + size]))
     out.append(("F_END", b""))
 
-    sprite_bytes = 0
+    sprite_bytes = dummied = kept_sprites = 0
     if not args.no_sprites:
+        keep_spr = None
+        if not args.all_sprites:
+            state_sprite, state_next, mobjs = parse_actor_tables(args.engine)
+            statenum = parse_enum(
+                open(os.path.join(os.path.expanduser(args.engine), "info.h")).read(),
+                "statenum_t")
+            placed = map_doomednums(data, dirents, mapstart)
+            starts = list(parse_weapon_states(args.engine, statenum))
+            for mt in mobjs:
+                # Types the map places, and every type the code can spawn on
+                # its own -- which is exactly those with no doomednum.
+                if mt["doomednum"] == -1 or mt["doomednum"] in placed:
+                    starts.extend(mt["states"])
+            keep_spr = reachable_sprites(starts, state_sprite, state_next)
+
+        blank = dummy_patch()
         out.append(("S_START", b""))
         for i, (name, pos, size) in enumerate(dirents):
-            if ns.get(i) == "S":
+            if ns.get(i) != "S":
+                continue
+            if keep_spr is None or name[:4] in keep_spr:
                 out.append((name, data[pos:pos + size]))
                 sprite_bytes += size
+                kept_sprites += 1
+            else:
+                out.append((name, blank))
+                sprite_bytes += len(blank)
+                dummied += 1
         out.append(("S_END", b""))
 
     body, directory, off = [], [], 12
@@ -346,7 +542,10 @@ def main():
           f"{len(keeptex) - len(wanted)} to complete animations)")
     print(f"  patches  {len(seen)} of {len(pnames)} in PNAMES")
     print(f"  flats    {len(seenf)} of {len(flatnames)}")
-    print(f"  sprites  {sprite_bytes:,} bytes")
+    if stubbed:
+        print(f"  stubbed  {stubbed} lump(s) kept by name only, {stub_bytes:,} bytes dropped")
+    print(f"  sprites  {sprite_bytes:,} bytes, {kept_sprites} lumps kept, "
+          f"{dummied} blanked")
     if missing:
         print(f"  WARNING: map names {len(missing)} textures the WAD does not define: "
               f"{sorted(missing)[:8]}")
