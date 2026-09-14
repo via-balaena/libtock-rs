@@ -128,9 +128,16 @@
 //! The first run of this app, 2026-09-14, got the geometry line right and then
 //! **eleven BUSY answers in a row, the first call included.** The cause is not
 //! this app and not the wrapper: `st77xx` answers BUSY while its `Status` is
-//! anything but `Idle`, and its init sequence -- SWRESET 150 ms, SLPOUT 255 ms,
-//! INVON 120 ms, DISPLAY_ON 100 ms -- runs north of 600 ms after boot. Eleven
-//! syscalls fit inside that window with room to spare.
+//! anything but `Idle`, and getting to `Idle` takes **1240 ms from `init()`** --
+//! a 370 ms hardware-reset ladder before the init sequence, then 870 ms of
+//! sequence delays. Eleven syscalls fit inside that window with room to spare.
+//!
+//! **870, not the 625 those constants appear to sum to.** `delay: 255` is a
+//! sentinel rather than a duration: `do_next_op` maps it to 500
+//! (`tock/capsules/extra/src/st77xx.rs:545-547`). So `SLEEP_OUT` is really 500 --
+//! 40% of the whole gap in one command -- and `SW_RESET`'s `delay: 150` carries
+//! a `// 255?` comment, meaning a change to 255 there would silently become 500
+//! as well. Read the mapping, never the constant.
 //!
 //! **A kernel client waits for `screen_is_ready()`. An app cannot.** The
 //! capsule implements readiness and uses it to run queued commands, but nothing
