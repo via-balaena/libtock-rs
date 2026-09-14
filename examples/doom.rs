@@ -35,6 +35,7 @@
 
 use core::fmt::Write;
 use core::ptr::addr_of_mut;
+use libtock::adc::Adc;
 use libtock::alarm::{Alarm, Milliseconds};
 use libtock::buttons::Buttons;
 use libtock::console::Console;
@@ -75,6 +76,31 @@ const READY_BUDGET_MS: u32 = 5_000;
 // Doom's own, from doomkeys.h and m_controls.c's defaults.
 const KEY_FIRE: u8 = 0x80 + 0x1d; // KEY_RCTRL
 const KEY_USE: u8 = b' ';
+const KEY_UP: u8 = 0xad;
+const KEY_DOWN: u8 = 0xaf;
+const KEY_LEFT: u8 = 0xac;
+const KEY_RIGHT: u8 = 0xae;
+
+/// The six things this board can ask Doom to do, in the order DG_GetKey
+/// reports them.
+const KEYS: [u8; 6] = [KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_FIRE, KEY_USE];
+
+/// Joystick axes. GP26 is ADC0 and GP27 is ADC1, both confirmed rail to rail.
+const AXIS_MOVE: u32 = 0;
+const AXIS_TURN: u32 = 1;
+
+/// The stick rests near mid-scale and the converter is 16-bit. A quarter of
+/// full travel either way is a deadzone wide enough that a stick which does
+/// not self-centre perfectly will not walk the player into a wall on its own.
+const AXIS_LOW: u16 = 16_384;
+const AXIS_HIGH: u16 = 49_152;
+
+/// Set if the stick turns out to be wired the other way up. Which way GP26
+/// increases was never measured -- only that holding the stick DOWN pulled the
+/// pin low -- so this is the one thing here taken on inference rather than
+/// measurement, and it is a constant so that being wrong costs one edit.
+const INVERT_MOVE: bool = false;
+const INVERT_TURN: bool = false;
 
 static WAD: &[u8] = include_bytes!("assets/wad_trim.bin");
 /// The name `fopen` answers to. Doom's IWAD search wants a name that exists;
@@ -152,6 +178,9 @@ fn stack_used() -> (usize, usize) {
 }
 
 fn report_budget<W: Write>(console: &mut W) {
+    // SAFETY: single-threaded read of values the input path writes.
+    let axes = unsafe { AXIS_RAW };
+    let _ = writeln!(console, "doom: joystick move={} turn={}", axes[0], axes[1]);
     let (used, total) = stack_used();
     let (mut hused, mut hpeak) = (0usize, 0usize);
     let (mut calls, mut dropped) = (0u32, 0u32);
@@ -190,7 +219,11 @@ extern "C" {
 
 static mut PALETTE: [u16; 256] = [0; 256];
 static mut STAGE: [u8; STAGE_BYTES] = [0; STAGE_BYTES];
-static mut BUTTON_WAS: [bool; 2] = [false; 2];
+/// What the inputs say, and what Doom has been told they say.
+static mut WANT: [bool; 6] = [false; 6];
+static mut TOLD: [bool; 6] = [false; 6];
+static mut IN_BURST: bool = false;
+static mut AXIS_RAW: [u16; 2] = [0; 2];
 static mut FRAMES: u32 = 0;
 
 fn rgb565(r: u8, g: u8, b: u8) -> u16 {
@@ -213,23 +246,68 @@ pub extern "C" fn DG_SleepMs(ms: u32) {
     let _ = Alarm::sleep_for(Milliseconds(ms));
 }
 
-/// One event per call, which is the interface doomgeneric expects: it calls
-/// until this returns 0. Two buttons, reported on edges.
+/// Read the stick and the buttons into the six key states Doom is told about.
+///
+/// Two buttons cannot play Doom -- there is nothing to move or turn with -- so
+/// the kit's joystick is the other half. It has two analogue axes and no click
+/// button, which is exactly four directions, and the buttons are fire and use.
+fn sample_input() -> [bool; 6] {
+    let mut want = [false; 6];
+
+    let (mut fwd, mut back) = (false, false);
+    if let Ok(v) = Adc::read_single_sample_sync(AXIS_MOVE) {
+        fwd = v > AXIS_HIGH;
+        back = v < AXIS_LOW;
+        // SAFETY: single-threaded; read back by the periodic report so the
+        // axis wiring can be checked against what the stick is doing.
+        unsafe { AXIS_RAW[0] = v }
+    }
+    let (mut left, mut right) = (false, false);
+    if let Ok(v) = Adc::read_single_sample_sync(AXIS_TURN) {
+        right = v > AXIS_HIGH;
+        left = v < AXIS_LOW;
+        unsafe { AXIS_RAW[1] = v }
+    }
+    if INVERT_MOVE {
+        core::mem::swap(&mut fwd, &mut back);
+    }
+    if INVERT_TURN {
+        core::mem::swap(&mut left, &mut right);
+    }
+
+    want[0] = fwd;
+    want[1] = back;
+    want[2] = left;
+    want[3] = right;
+    want[4] = Buttons::is_pressed(1);
+    want[5] = Buttons::is_pressed(0);
+    want
+}
+
+/// One event per call, which is the interface doomgeneric expects: `I_GetEvent`
+/// calls until this returns 0.
+///
+/// The inputs are sampled once per burst, not once per call: a burst is at
+/// most seven calls and re-reading the converter on each would be fourteen
+/// syscalls where two will do.
 #[no_mangle]
 pub extern "C" fn DG_GetKey(pressed: *mut i32, key: *mut u8) -> i32 {
-    for b in 0..2u32 {
-        let now = Buttons::is_pressed(b);
-        // SAFETY: single-threaded, and this is the only writer.
-        let was = unsafe { &mut *addr_of_mut!(BUTTON_WAS) };
-        if now != was[b as usize] {
-            was[b as usize] = now;
-            // SAFETY: doomgeneric passes two valid out-pointers.
-            unsafe {
-                *pressed = if now { 1 } else { 0 };
-                *key = if b == 0 { KEY_USE } else { KEY_FIRE };
-            }
-            return 1;
+    // SAFETY: single-threaded, and this is the only writer of these.
+    unsafe {
+        if !IN_BURST {
+            WANT = sample_input();
+            IN_BURST = true;
         }
+        for i in 0..KEYS.len() {
+            if WANT[i] != TOLD[i] {
+                TOLD[i] = WANT[i];
+                // SAFETY: doomgeneric passes two valid out-pointers.
+                *pressed = if WANT[i] { 1 } else { 0 };
+                *key = KEYS[i];
+                return 1;
+            }
+        }
+        IN_BURST = false;
     }
     0
 }
@@ -352,10 +430,13 @@ fn main() {
             " (NOT IN FLASH -- it was copied to RAM)"
         }
     );
+    // The stack size comes from STACK_MEMORY, not from a literal: it was a
+    // literal that said 32 KiB while the build reserved 8.
+    let stack_total = unsafe { (*addr_of_mut!(STACK_MEMORY)).len() };
     let _ = writeln!(
         console,
-        "doom: heap {} bytes, zone {} KiB, stack 32 KiB, staging {} bytes",
-        HEAP_BYTES, ZONE_KIB, STAGE_BYTES
+        "doom: heap {HEAP_BYTES} bytes, zone {ZONE_KIB} KiB, stack {stack_total} bytes, \
+         staging {STAGE_BYTES} bytes"
     );
     match Buttons::count() {
         Ok(n) => {
@@ -363,6 +444,14 @@ fn main() {
         }
         Err(e) => {
             let _ = writeln!(console, "doom: no button driver ({e:?})");
+        }
+    }
+    match Adc::count() {
+        Ok(n) => {
+            let _ = writeln!(console, "doom: {n} analogue channels for the stick");
+        }
+        Err(e) => {
+            let _ = writeln!(console, "doom: NO ADC DRIVER ({e:?}) -- no stick, no movement");
         }
     }
 
