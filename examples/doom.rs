@@ -23,7 +23,15 @@
 //!
 //! # Memory
 //!
-//! A process here gets 392 KiB, and every number below is spent against that.
+//! A process here gets **480 KiB** on the Pico 2 W -- `raspberry_pi_pico_2_w`
+//! in `build_scripts`, RAM at `0x2000A000` -- and every number below is spent
+//! against that. This said 392 KiB, which is the plain Pico 2's row; the W has
+//! more, and this example only builds for the W.
+//!
+//! Measured 2026-09-15 with `arm-none-eabi-size -A`: stack 4,096, .data
+//! 20,136, .bss 458,856 -- 483,088 of 491,520, so about 8 KiB is unspent, and
+//! `HEAP_BYTES` now has most of it. The linker is what enforces this, so
+//! overspending is a build failure rather than a crash.
 //! `HEAP_BYTES` is what the shim's allocator hands out and is almost entirely
 //! Doom's zone, which takes it in one call; the zone size is passed as `-kb`
 //! so the two cannot silently disagree. `DG_ScreenBuffer` costs nothing
@@ -127,10 +135,10 @@ fn build_scale_maps() {
 
 /// What the shim's allocator hands out. Doom's zone takes nearly all of it in
 /// one call, so this and `ZONE_KIB` move together.
-const HEAP_BYTES: usize = 288 * 1024;
+const HEAP_BYTES: usize = 296 * 1024;
 /// Passed to Doom as `-kb`. Leaves the heap a few KiB for the handful of
 /// strings Doom duplicates outside the zone.
-const ZONE_KIB: usize = 256;
+const ZONE_KIB: usize = 264;
 
 /// The panel spends over a second in its init sequence and answers BUSY until
 /// it is done. Measured at 1225 ms from userspace.
