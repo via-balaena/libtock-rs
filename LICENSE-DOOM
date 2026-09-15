@@ -1,0 +1,32 @@
+Licensing for the `doom` example
+================================
+
+Everything in this repository is Apache-2.0 OR MIT, and that includes
+`examples/doom.rs` and the tools under `examples/assets/`. Those are
+original work: writing to doomgeneric's `DG_*` hook API does not make a
+file a derivative of Doom.
+
+What the `doom` feature changes is the BINARY, not these sources.
+
+  * The feature is off by default, and this repository vendors no Doom
+    source at all. `cargo build --features doom` compiles a doomgeneric
+    checkout named by DOOM_SRC (default `~/forge/doomgeneric`) and hands
+    its objects to the linker.
+
+  * doomgeneric derives from the Doom source id Software released under
+    the GNU General Public License, version 2. A binary that links it is
+    a combined work and may only be distributed under GPL-2.0-only.
+
+  * Apache-2.0 is incompatible with GPL-2.0-only. This repository's
+    license is a disjunction, so whoever distributes such a binary takes
+    these files under MIT -- which is GPL-2.0 compatible -- and ships the
+    combined work under GPL-2.0-only.
+
+No other example links GPL code. `kit_doom_frame` and `kit_wad_xip`
+measure the frame and flash paths without Doom, and the converters under
+`examples/assets/` read a doomgeneric checkout's source at run time
+without embedding any of it.
+
+Our doomgeneric fork, which carries the Tock libc shim, is at
+https://github.com/via-balaena/doomgeneric (GPL-2.0-only), forked from
+https://github.com/ozkl/doomgeneric.

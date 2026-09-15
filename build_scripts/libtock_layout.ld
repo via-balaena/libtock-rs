@@ -156,6 +156,18 @@ SECTIONS {
      * mainly put in this linker script so that we get an error if it overflows
      * the RAM region.
      */
+    /* `AT > FLASH` looks redundant on a NOLOAD section and is NOT. It is what
+     * puts .bss in a PT_LOAD program header (p_filesz 0, p_memsz its size),
+     * which is where elf2tab reads the app's RAM requirement from. Removing
+     * it stops .bss counting against the FLASH region -- which is tempting,
+     * because that accounting is what fails first for an app with a large
+     * .bss -- but the app then declares a minimum_ram_size that omits .bss
+     * entirely, and the kernel grants it that much and nothing more. Measured
+     * on a Pico 2 W: 56,128 bytes granted for an app needing 499,616, and an
+     * immediate fault with PC 0xBAD00BAD.
+     *
+     * So the FLASH region has to be big enough for .rodata + .data + .bss
+     * even though .bss occupies none of it. */
     .bss ALIGN(4) (NOLOAD) : {
         /* .sbss is the RISC-V small data section */
         *(.sbss .bss.*)

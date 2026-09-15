@@ -23,7 +23,24 @@ fn get_platform_architecture(platform: &str) -> Option<&'static str> {
         "imxrt1050" | "teensy40" => Some("cortex-m7"),
         "opentitan" | "esp32_c3_devkitm_1" => Some("riscv32imc"),
         "hifive1" | "qemu_rv32_virt" => Some("riscv32imac"),
-        "psc3m5_evk" => Some("cortex-m33"),
+        "psc3m5_evk" | "raspberry_pi_pico_2" | "raspberry_pi_pico_2_w" => Some("cortex-m33"),
+        _ => None,
+    }
+}
+
+// How the total TBF size must be padded, when elf2tab's own per-architecture
+// default is wrong for the target.
+//
+// elf2tab pads every ARM TBF to a power of two, because an ARMv7-M MPU region
+// must be a power of two in size and naturally aligned. ARMv8-M regions are
+// 32-byte granular instead -- Tock spells the same 32 as
+// CORTEXM_MIN_REGION_SIZE in arch/cortex-m33/src/mpu_v8m.rs, the MPU driver
+// these boards use -- so a Cortex-M33 app would otherwise pay for a constraint
+// its MPU does not have. On a Pico 2 W that caps an app at 2 MiB out of a
+// 3520K region.
+fn get_trailing_padding(architecture: &str) -> Option<&'static str> {
+    match architecture {
+        "cortex-m33" => Some("32"),
         _ => None,
     }
 }
@@ -42,8 +59,12 @@ pub fn convert_elf(cli: &Cli, platform: &str) -> OutFiles {
     let elf = cli.elf.as_os_str();
     let mut tbf_path = cli.elf.clone();
     tbf_path.set_extension("tbf");
-    let architecture =
-        get_platform_architecture(platform).expect("Failed to determine ELF's architecture");
+    let architecture = get_platform_architecture(platform).unwrap_or_else(|| {
+        panic!(
+            "Unknown architecture for platform {platform:?}. \
+             Add it to get_platform_architecture in runner/src/elf2tab.rs."
+        )
+    });
     if cli.verbose {
         println!("ELF file: {elf:?}");
         println!("TBF path: {}", tbf_path.display());
@@ -73,6 +94,9 @@ pub fn convert_elf(cli: &Cli, platform: &str) -> OutFiles {
         "--stack".as_ref(), stack_size.as_ref(),
         format!("{},{}", elf.to_str().unwrap(), architecture).as_ref(),
     ]);
+    if let Some(multiple) = get_trailing_padding(architecture) {
+        command.args(["--trailing-padding", multiple]);
+    }
     if cli.verbose {
         command.arg("-v");
         println!("elf2tab command: {command:?}");

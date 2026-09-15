@@ -49,9 +49,14 @@ endif
 toolchain:
 	cargo -V
 
+# Our elf2tab, not the crates.io one. It adds --trailing-padding, which the
+# runner passes for Cortex-M33 targets so an app is not rounded up to a power
+# of two for an MPU constraint ARMv8-M does not have. Only cortex-m33 platforms
+# pass the flag, so a stock elf2tab still builds every other board -- but a
+# stock one will reject the flag outright, so this is what `make setup` gets.
 .PHONY: setup
 setup: setup-qemu toolchain
-	cargo install elf2tab
+	cargo install --git https://github.com/via-balaena/elf2tab --branch master elf2tab
 
 # Sets up QEMU in the tock/ directory. We use Tock's QEMU which may contain
 # patches to better support boards that Tock supports.
@@ -93,6 +98,17 @@ examples: toolchain
 	LIBTOCK_PLATFORM=opentitan cargo build --examples --release \
 		--target=riscv32imc-unknown-none-elf
 
+# Examples behind a non-default feature need their own pass. `cargo build
+# --examples` silently skips any example whose required-features are unmet, so
+# without this nothing in CI would ever compile them and they would rot
+# unnoticed. The featureless pass above stays, so both configurations are built.
+.PHONY: examples-async
+examples-async: toolchain
+	LIBTOCK_PLATFORM=nrf52 cargo build --examples --release --features=async \
+		--target=thumbv7em-none-eabi
+	LIBTOCK_PLATFORM=opentitan cargo build --examples --release --features=async \
+		--target=riscv32imc-unknown-none-elf
+
 # Arguments to pass to cargo to exclude crates that require a Tock runtime.
 # This is largely libtock_runtime and crates that depend on libtock_runtime.
 # Used when we need to build a crate for the host OS, as libtock_runtime only
@@ -112,13 +128,25 @@ EXCLUDE_STD := --exclude libtock_unittest --exclude print_sizes \
                --exclude libtock_build_scripts
 
 .PHONY: test
-test: examples
+test: examples examples-async
 	cargo test $(EXCLUDE_RUNTIME) --workspace
+# The `async` tests inside a driver crate do not run above. Workspace
+# feature unification enables `async` on the crates `libtock_async`
+# dev-depends on and no others, and `--workspace --features=async` cannot
+# stand in: it drags `libtock_runtime` into a host build, which does not
+# compile. So each such crate gets a pass of its own, or its tests are
+# silently skipped rather than run.
+	cargo test -p libtock_gpio --features async
+	cargo test -p libtock_stepper --features async
 	LIBTOCK_PLATFORM=nrf52 cargo fmt --all -- --check
 	cargo clippy --all-targets $(EXCLUDE_RUNTIME) --workspace
 	LIBTOCK_PLATFORM=nrf52 cargo clippy $(EXCLUDE_STD) \
 		--target=thumbv7em-none-eabi --workspace
 	LIBTOCK_PLATFORM=hifive1 cargo clippy $(EXCLUDE_STD) \
+		--target=riscv32imac-unknown-none-elf --workspace
+	LIBTOCK_PLATFORM=nrf52 cargo clippy $(EXCLUDE_STD) --features=async \
+		--target=thumbv7em-none-eabi --workspace
+	LIBTOCK_PLATFORM=hifive1 cargo clippy $(EXCLUDE_STD) --features=async \
 		--target=riscv32imac-unknown-none-elf --workspace
 	cd nightly && \
 		MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" \
@@ -186,6 +214,8 @@ $(eval $(call platform_build,nucleo_f446re,thumbv7em-none-eabi))
 $(eval $(call platform_build,nrf52840,thumbv7em-none-eabi))
 $(eval $(call platform_flash,nrf52840,thumbv7em-none-eabi))
 $(eval $(call platform_build,raspberry_pi_pico,thumbv6m-none-eabi))
+$(eval $(call platform_build,raspberry_pi_pico_2,thumbv8m.main-none-eabi))
+$(eval $(call platform_build,raspberry_pi_pico_2_w,thumbv8m.main-none-eabi))
 $(eval $(call platform_build,pico_explorer_base,thumbv6m-none-eabi))
 $(eval $(call platform_build,nano33ble,thumbv6m-none-eabi))
 $(eval $(call platform_build,nano_rp2040_connect,thumbv6m-none-eabi))

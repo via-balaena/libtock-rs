@@ -42,7 +42,11 @@ fn kernel_integration() {
     adc.set_value(100);
     assert!(fake::Syscalls::command(DRIVER_NUM, SINGLE_SAMPLE, 0, 1).is_success());
 
-    let listener = Cell::<Option<(u32,)>>::new(None);
+    // All three arguments, not just the first. The capsule schedules
+    // `(AdcMode as usize, channel, sample)`, and a listener that captures only
+    // the first was checking the mode while appearing to check the sample --
+    // which is how a fake that put the sample first went unnoticed.
+    let listener = Cell::<Option<(u32, u32, u32)>>::new(None);
     share::scope(|subscribe| {
         assert_eq!(
             fake::Syscalls::subscribe::<_, _, DefaultConfig, DRIVER_NUM, 0>(subscribe, &listener),
@@ -51,7 +55,11 @@ fn kernel_integration() {
 
         adc.set_value(100);
         assert_eq!(fake::Syscalls::yield_no_wait(), YieldNoWaitReturn::Upcall);
-        assert_eq!(listener.get(), Some((100,)));
+        assert_eq!(
+            listener.get(),
+            Some((0, 0, 100)),
+            "mode SingleSample, channel 0, and the sample last"
+        );
 
         adc.set_value(200);
         assert_eq!(fake::Syscalls::yield_no_wait(), YieldNoWaitReturn::NoUpcall);

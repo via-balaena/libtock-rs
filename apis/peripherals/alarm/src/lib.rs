@@ -102,6 +102,67 @@ impl<S: Syscalls, C: platform::subscribe::Config> Alarm<S, C> {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Async interface
+// -----------------------------------------------------------------------------
+
+/// The alarm-specific half of a [`Sleep`].
+#[cfg(feature = "async")]
+pub struct SleepOp {
+    ticks: Ticks,
+}
+
+#[cfg(feature = "async")]
+impl<S: Syscalls> platform::async_call::Operation<S> for SleepOp {
+    type Value = ();
+
+    fn start(&self) -> Result<(), ErrorCode> {
+        S::command(DRIVER_NUM, command::SET_RELATIVE, self.ticks.0, 0)
+            .to_result()
+            .map(|_when: u32| ())
+    }
+
+    fn cancel(&self) {
+        // Unsubscribing alone would leave the alarm capsule holding a virtual
+        // alarm for this process that expires into a null upcall. Command 3
+        // ignores its arguments and reports ALREADY if the alarm has meanwhile
+        // expired, which is why the result is discarded.
+        let _ = S::command(DRIVER_NUM, command::STOP, 0, 0);
+    }
+
+    fn complete(&self, _args: (u32, u32, u32)) -> Result<(), ErrorCode> {
+        Ok(())
+    }
+}
+
+/// A future that resolves once the alarm fires. Create one with
+/// [`Alarm::sleep_for_async`].
+///
+/// Only one `Sleep` may be polled at a time: Tock gives a process a single
+/// upcall slot per (driver, subscribe number), so a second `Sleep` polled while
+/// the first is outstanding would silently replace the first one's
+/// registration. Awaiting them in sequence is fine; racing two of them is not.
+/// Multiplexing one alarm across several deadlines needs a driver-level queue,
+/// the same problem `embassy-time-driver` solves.
+#[cfg(feature = "async")]
+pub type Sleep<S, C = DefaultConfig> =
+    platform::async_call::Call<S, C, SleepOp, DRIVER_NUM, { subscribe::CALLBACK }>;
+
+#[cfg(feature = "async")]
+impl<S: Syscalls, C: platform::subscribe::Config> Alarm<S, C> {
+    /// Returns a future that resolves after `time` has elapsed.
+    ///
+    /// The frequency lookup happens here rather than on first poll, so polling
+    /// cannot fail for a reason the caller has not already had a chance to see.
+    pub fn sleep_for_async<T: Convert>(time: T) -> Result<Sleep<S, C>, ErrorCode> {
+        let freq = Self::get_frequency()?;
+
+        Ok(platform::async_call::Call::new(SleepOp {
+            ticks: time.to_ticks(freq),
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests;
 

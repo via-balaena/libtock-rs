@@ -81,9 +81,9 @@ impl<S: Syscalls> Gpio<S> {
     /// previously registered listener.
     pub fn register_listener<'share, F: Fn(u32, GpioState)>(
         listener: &'share GpioInterruptListener<F>,
-        subscribe: Handle<Subscribe<'share, S, DRIVER_NUM, 0>>,
+        subscribe: Handle<Subscribe<'share, S, DRIVER_NUM, INTERRUPT_UPCALL>>,
     ) -> Result<(), ErrorCode> {
-        S::subscribe::<_, _, DefaultConfig, DRIVER_NUM, 0>(subscribe, listener)
+        S::subscribe::<_, _, DefaultConfig, DRIVER_NUM, INTERRUPT_UPCALL>(subscribe, listener)
     }
 
     /// Unregister the interrupt listener
@@ -91,7 +91,7 @@ impl<S: Syscalls> Gpio<S> {
     /// This function may be used even if there was no
     /// previously registered listener.
     pub fn unregister_listener() {
-        S::unsubscribe(DRIVER_NUM, 0)
+        S::unsubscribe(DRIVER_NUM, INTERRUPT_UPCALL)
     }
 }
 
@@ -105,7 +105,9 @@ impl<S: Syscalls> Gpio<S> {
 /// ```
 pub struct GpioInterruptListener<F: Fn(u32, GpioState)>(pub F);
 
-impl<F: Fn(u32, GpioState)> Upcall<OneId<DRIVER_NUM, 0>> for GpioInterruptListener<F> {
+impl<F: Fn(u32, GpioState)> Upcall<OneId<DRIVER_NUM, INTERRUPT_UPCALL>>
+    for GpioInterruptListener<F>
+{
     fn upcall(&self, gpio_index: u32, value: u32, _arg2: u32) {
         self.0(gpio_index, value.into())
     }
@@ -246,6 +248,97 @@ impl<S: Syscalls> embedded_hal::digital::OutputPin for OutputPin<'_, S> {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Async interface
+// -----------------------------------------------------------------------------
+
+/// The GPIO-specific half of an [`Edge`].
+#[cfg(feature = "async")]
+pub struct EdgeOp {
+    pin: u32,
+    edge: u32,
+}
+
+#[cfg(feature = "async")]
+impl EdgeOp {
+    fn disable_interrupts<S: Syscalls>(pin: u32) {
+        let _ = S::command(DRIVER_NUM, GPIO_DISABLE_INTERRUPTS, pin, 0);
+    }
+}
+
+#[cfg(feature = "async")]
+impl<S: Syscalls> libtock_platform::async_call::Operation<S> for EdgeOp {
+    /// Which pin fired, and the level it moved to.
+    type Value = (u32, GpioState);
+
+    fn start(&self) -> Result<(), ErrorCode> {
+        S::command(DRIVER_NUM, GPIO_ENABLE_INTERRUPTS, self.pin, self.edge).to_result()
+    }
+
+    fn cancel(&self) {
+        Self::disable_interrupts::<S>(self.pin);
+    }
+
+    fn complete(&self, args: (u32, u32, u32)) -> Result<Self::Value, ErrorCode> {
+        // Disabling here as well as in `cancel` keeps the enable exactly as long
+        // as the future, whichever way the future ends.
+        Self::disable_interrupts::<S>(self.pin);
+        Ok((args.0, args.1.into()))
+    }
+}
+
+/// A future that resolves on the next GPIO edge.
+///
+/// This is the first future here over an event nobody requested, and it is where
+/// the shape of `Operation` starts to show. Three things to know before using
+/// it.
+///
+/// **It reports which pin fired rather than filtering on it.** Driver 4 has one
+/// upcall slot for the whole process, shared by every pin, and the capsule
+/// broadcasts: `fired` walks every process holding a grant and schedules the
+/// upcall on all of them, whatever pins each one asked about. Since
+/// `Operation::complete` has no "that upcall was not mine, keep waiting" answer,
+/// an edge on any enabled pin resolves this future, and the pin number comes
+/// back in the value. Check it whenever more than one pin can fire.
+///
+/// Two `Edge` futures alive at once is a bug for the same reason two `Sleep`s
+/// are: the second registration replaces the first, and the first to drop
+/// unsubscribes for both. One at a time.
+///
+/// **Edges outside an await are lost.** The subscription lives exactly as long
+/// as the future: `Call` registers on first poll and unsubscribes on drop, and
+/// the kernel drops upcalls for an unsubscribed slot. A press between two awaits
+/// did not happen as far as the process is concerned. Alarm and console have no
+/// equivalent gap, because there the kernel only upcalls in answer to a request
+/// the process made. This is a sampled edge, not a stream — a `loop` over it
+/// misses whatever arrives while the body runs.
+///
+/// **It owns the pin's interrupt enable** for its whole life, so do not also
+/// call [`InputPin::enable_interrupts`] on the same pin. Keep the `InputPin`
+/// alive at least as long as the future: dropping it disables the pin outright.
+/// The enable is raw hardware state — driver 4 keeps a `Grant<()>`, so unlike
+/// the button capsule it holds no per-process record of who wanted an
+/// interrupt, and one process disabling a pin ends everyone's edges on it. That
+/// is in keeping with driver 4 being the deliberately low-level one; a board
+/// that wants ownership should wire the pin to a capsule that models it.
+#[cfg(feature = "async")]
+pub type Edge<S, C = DefaultConfig> =
+    libtock_platform::async_call::Call<S, C, EdgeOp, DRIVER_NUM, INTERRUPT_UPCALL>;
+
+#[cfg(feature = "async")]
+impl<S: Syscalls, P: Pull> InputPin<'_, S, P> {
+    /// Returns a future that resolves on this pin's next `edge`.
+    ///
+    /// See [`Edge`] for what the future does and does not promise; it is less
+    /// than a caller coming from `Alarm::sleep_for_async` will expect.
+    pub fn next_edge(&self, edge: PinInterruptEdge) -> Edge<S> {
+        libtock_platform::async_call::Call::new(EdgeOp {
+            pin: self.pin.pin_number,
+            edge: edge as u32,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -272,3 +365,6 @@ const GPIO_DISABLE_INTERRUPTS: u32 = 8;
 const GPIO_DISABLE: u32 = 9;
 
 const GPIO_COUNT: u32 = 10;
+
+// Subscribe IDs
+const INTERRUPT_UPCALL: u32 = 0;

@@ -131,6 +131,110 @@ impl<T: platform::allow_ro::Config + platform::allow_rw::Config + platform::subs
 {
 }
 
+// -----------------------------------------------------------------------------
+// Async interface
+// -----------------------------------------------------------------------------
+
+/// The bytes a completed [`Read`] produced.
+#[cfg(feature = "async")]
+pub struct ReadOutput<const N: usize> {
+    buffer: [u8; N],
+    count: usize,
+}
+
+#[cfg(feature = "async")]
+impl<const N: usize> core::fmt::Debug for ReadOutput<N> {
+    /// Shows the bytes received, not the whole backing array: everything past
+    /// `count` is uninitialised as far as the caller is concerned.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ReadOutput")
+            .field("bytes", &self.bytes())
+            .finish()
+    }
+}
+
+#[cfg(feature = "async")]
+impl<const N: usize> ReadOutput<N> {
+    /// The bytes the kernel wrote, which may be shorter than `N`.
+    pub fn bytes(&self) -> &[u8] {
+        &self.buffer[..self.count]
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+}
+
+/// The console-specific half of a [`Read`].
+#[cfg(feature = "async")]
+pub struct ReadOp;
+
+#[cfg(feature = "async")]
+impl<S: Syscalls, const N: usize> platform::async_call::BufferedOperation<S, N> for ReadOp {
+    type Value = ReadOutput<N>;
+
+    fn start(&self, len: usize) -> Result<(), ErrorCode> {
+        S::command(DRIVER_NUM, command::READ, len as u32, 0).to_result::<(), ErrorCode>()
+    }
+
+    fn cancel(&self) {
+        // Unallowing alone would leave the console driver mid-receive with
+        // nowhere to put the bytes. Command 3 aborts the receive and reports
+        // what arrived so far; that upcall is discarded by the unsubscribe that
+        // follows.
+        let _ = S::command(DRIVER_NUM, command::ABORT, 0, 0);
+    }
+
+    fn complete(
+        &self,
+        args: (u32, u32, u32),
+        buffer: &[u8; N],
+    ) -> Result<ReadOutput<N>, ErrorCode> {
+        let (status, count, _) = args;
+
+        if status != 0 {
+            return Err(status.try_into().unwrap_or(ErrorCode::Fail));
+        }
+
+        Ok(ReadOutput {
+            buffer: *buffer,
+            // The kernel should never report more than it was given room for,
+            // but clamp rather than trust it: this length indexes a slice.
+            count: core::cmp::min(count as usize, N),
+        })
+    }
+}
+
+/// A future that resolves once the console has delivered bytes. Create one with
+/// [`Console::read_async`].
+///
+/// Unlike the blocking [`Console::read`], this does not borrow a buffer from the
+/// caller. A future holding a `&mut [u8]` from the caller's frame could be
+/// `mem::forget`-ed, which ends the borrow without running the unallow and
+/// leaves the kernel writing into stack the process is free to reuse. Owning the
+/// buffer converts that hazard into a leak, and memory that is never reused is
+/// memory the kernel may safely keep writing to.
+#[cfg(feature = "async")]
+pub type Read<S, C, const N: usize> = platform::async_call::BufferedCall<
+    S,
+    C,
+    ReadOp,
+    DRIVER_NUM,
+    { subscribe::READ },
+    { allow_rw::READ },
+    N,
+>;
+
+#[cfg(feature = "async")]
+impl<S: Syscalls, C: Config> Console<S, C> {
+    /// Returns a future that reads up to `N` bytes from the console.
+    ///
+    /// `N` is chosen at the call site: `Console::<S>::read_async::<64>()`.
+    pub fn read_async<const N: usize>() -> Read<S, C, N> {
+        platform::async_call::BufferedCall::new(ReadOp)
+    }
+}
+
 #[cfg(test)]
 mod tests;
 

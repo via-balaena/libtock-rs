@@ -28,6 +28,10 @@ pub mod alarm {
     use libtock_alarm as alarm;
     pub type Alarm = alarm::Alarm<super::runtime::TockSyscalls>;
     pub use alarm::{Convert, Hz, Milliseconds, Ticks};
+
+    /// The future returned by `Alarm::sleep_for_async`.
+    #[cfg(feature = "async")]
+    pub type Sleep = alarm::Sleep<super::runtime::TockSyscalls>;
 }
 pub mod ambient_light {
     use libtock_ambient_light as ambient_light;
@@ -48,6 +52,19 @@ pub mod console {
     use libtock_console as console;
     pub type Console = console::Console<super::runtime::TockSyscalls>;
     pub use console::ConsoleWriter;
+
+    /// The future returned by `Console::read_async`, reading up to `N` bytes.
+    #[cfg(feature = "async")]
+    pub type Read<const N: usize> =
+        console::Read<super::runtime::TockSyscalls, super::platform::DefaultConfig, N>;
+    #[cfg(feature = "async")]
+    pub use console::ReadOutput;
+}
+/// Driving futures. Named `futures` rather than `async` because the latter is a
+/// keyword and `libtock::r#async::block_on` is nobody's idea of an API.
+#[cfg(feature = "async")]
+pub mod futures {
+    pub use libtock_async::{block_on, join, select, Either};
 }
 pub mod gpio {
     use libtock_gpio as gpio;
@@ -56,6 +73,10 @@ pub mod gpio {
         Error, GpioInterruptListener, GpioState, InputPin, OutputPin, PinInterruptEdge, Pull,
         PullDown, PullNone, PullUp,
     };
+
+    /// The future returned by `InputPin::next_edge`.
+    #[cfg(feature = "async")]
+    pub type Edge = gpio::Edge<super::runtime::TockSyscalls>;
 }
 pub mod i2c_master {
     use libtock_i2c_master as i2c_master;
@@ -105,6 +126,15 @@ pub mod spi_controller;
 pub mod spi_controller {
     use libtock_spi_controller as spi_controller;
     pub type SpiController = spi_controller::SpiController<super::runtime::TockSyscalls>;
+}
+pub mod stepper {
+    use libtock_stepper as stepper;
+    pub type Stepper = stepper::Stepper<super::runtime::TockSyscalls>;
+    pub use stepper::Interval;
+
+    /// The future returned by `Stepper::step_forward_async`.
+    #[cfg(feature = "async")]
+    pub type Step = stepper::Step<super::runtime::TockSyscalls>;
 }
 pub mod temperature {
     use libtock_temperature as temperature;

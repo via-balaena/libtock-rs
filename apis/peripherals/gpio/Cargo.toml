@@ -11,6 +11,10 @@ description = "libtock gpio driver"
 [features]
 rust_embedded = ["embedded-hal"]
 
+# Adds `Future`-returning APIs alongside the blocking ones. Off by default so
+# apps that only poll pins link no waker machinery.
+async = ["libtock_platform/async"]
+
 [dependencies]
 libtock_platform = { path = "../../../platform" }
 embedded-hal = { version = "1.0", optional = true }

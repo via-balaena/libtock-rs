@@ -13,3 +13,6 @@ description = "libtock SPI controller driver"
 
 [dependencies]
 libtock_platform = { path = "../../../platform" }
+
+[dev-dependencies]
+libtock_unittest = { path = "../../../unittest" }

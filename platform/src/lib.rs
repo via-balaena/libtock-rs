@@ -3,6 +3,8 @@
 
 pub mod allow_ro;
 pub mod allow_rw;
+#[cfg(feature = "async")]
+pub mod async_call;
 pub mod command_return;
 mod constants;
 mod default_config;

@@ -180,7 +180,101 @@ impl<S: Syscalls, C: Config> SpiController<S, C> {
             }
         })
     }
+
+    // -------------------------------------------------------------------------
+    // Bus configuration
+    // -------------------------------------------------------------------------
+
+    /// Asks for a clock rate in Hz.
+    ///
+    /// The kernel sets the closest rate its divider can produce, which is
+    /// usually not the one asked for. Read it back with
+    /// [`SpiController::get_baud_rate`] rather than assuming; a peripheral with
+    /// a maximum will not thank you for the difference.
+    ///
+    /// Worth having as a runtime call rather than a board constant: some
+    /// devices read far slower than they write — an ILI9341 display accepts
+    /// writes past 10 MHz and register reads only to about 6.6 — so the rate
+    /// that works is a property of the operation, not of the bus.
+    pub fn set_baud_rate(rate: u32) -> Result<(), ErrorCode> {
+        S::command(DRIVER_NUM, spi_controller_cmd::SET_BAUD, rate, 0).to_result()
+    }
+
+    /// The clock rate in Hz the kernel actually set.
+    pub fn get_baud_rate() -> Result<u32, ErrorCode> {
+        S::command(DRIVER_NUM, spi_controller_cmd::GET_BAUD, 0, 0).to_result()
+    }
+
+    /// Sets which clock edge samples the data.
+    pub fn set_phase(phase: ClockPhase) -> Result<(), ErrorCode> {
+        S::command(DRIVER_NUM, spi_controller_cmd::SET_PHASE, phase as u32, 0).to_result()
+    }
+
+    /// The clock phase currently set.
+    pub fn get_phase() -> Result<ClockPhase, ErrorCode> {
+        let phase: u32 = S::command(DRIVER_NUM, spi_controller_cmd::GET_PHASE, 0, 0).to_result()?;
+        Ok(phase.into())
+    }
+
+    /// Sets the level the clock idles at.
+    pub fn set_polarity(polarity: ClockPolarity) -> Result<(), ErrorCode> {
+        S::command(
+            DRIVER_NUM,
+            spi_controller_cmd::SET_POLARITY,
+            polarity as u32,
+            0,
+        )
+        .to_result()
+    }
+
+    /// The clock polarity currently set.
+    pub fn get_polarity() -> Result<ClockPolarity, ErrorCode> {
+        let polarity: u32 =
+            S::command(DRIVER_NUM, spi_controller_cmd::GET_POLARITY, 0, 0).to_result()?;
+        Ok(polarity.into())
+    }
 }
+
+/// Which clock edge samples the data. Half of what is usually called the SPI
+/// mode, the other half being [`ClockPolarity`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ClockPhase {
+    SampleLeading = 0,
+    SampleTrailing = 1,
+}
+
+/// The level the clock idles at.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ClockPolarity {
+    IdleLow = 0,
+    IdleHigh = 1,
+}
+
+impl From<u32> for ClockPhase {
+    /// Anything but zero is trailing, which is how the capsule reads the
+    /// argument on the way in — see command 7 in
+    /// `capsules/core/src/spi_controller.rs`. Matching it here keeps a value
+    /// written and read back the same value.
+    fn from(value: u32) -> ClockPhase {
+        match value {
+            0 => ClockPhase::SampleLeading,
+            _ => ClockPhase::SampleTrailing,
+        }
+    }
+}
+
+impl From<u32> for ClockPolarity {
+    /// See [`ClockPhase::from`]; command 9 reads its argument the same way.
+    fn from(value: u32) -> ClockPolarity {
+        match value {
+            0 => ClockPolarity::IdleLow,
+            _ => ClockPolarity::IdleHigh,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
 
 /// System call configuration trait for `SpiController`.
 pub trait Config:

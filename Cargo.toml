@@ -16,10 +16,27 @@ version = "0.1.0"
 rust-version = "1.87"
 
 [features]
+# Compiles doomgeneric's C from the tree named by DOOM_SRC and links it in.
+# That C is GPL-2.0-only, so a binary built with this feature on may only be
+# distributed under GPL-2.0-only. See LICENSE-DOOM.
+# Kept behind a feature because it needs that tree and a clang that can target
+# the board, which no other example does.
+doom = []
+
 rust_embedded = [
     "embedded-hal",
     "libtock_platform/rust_embedded",
     "libtock_gpio/rust_embedded",
+]
+
+# Pulls in the executor and the `Future`-returning driver APIs. Kept out of the
+# default graph so apps that do not use `async` link none of it.
+async = [
+    "libtock_async",
+    "libtock_alarm/async",
+    "libtock_console/async",
+    "libtock_gpio/async",
+    "libtock_stepper/async",
 ]
 
 [dependencies]
@@ -27,6 +44,7 @@ libtock_adc = { path = "apis/peripherals/adc" }
 libtock_air_quality = { path = "apis/sensors/air_quality" }
 libtock_alarm = { path = "apis/peripherals/alarm" }
 libtock_ambient_light = { path = "apis/sensors/ambient_light" }
+libtock_async = { path = "async", optional = true }
 libtock_buttons = { path = "apis/interface/buttons" }
 libtock_buzzer = { path = "apis/interface/buzzer" }
 libtock_console = { path = "apis/interface/console" }
@@ -47,9 +65,28 @@ libtock_runtime = { path = "runtime" }
 libtock_small_panic = { path = "panic_handlers/small_panic" }
 libtock_sound_pressure = { path = "apis/sensors/sound_pressure" }
 libtock_spi_controller = { path = "apis/peripherals/spi_controller" }
+libtock_stepper = { path = "apis/peripherals/stepper" }
 libtock_temperature = { path = "apis/sensors/temperature" }
 
 embedded-hal = { version = "1.0", optional = true }
+
+# Examples are otherwise auto-discovered; this one needs a section so that a
+# build without the `async` feature skips it instead of failing.
+[[example]]
+name = "doom"
+required-features = ["doom"]
+
+[[example]]
+name = "async_sleep"
+required-features = ["async"]
+
+[[example]]
+name = "async_probe"
+required-features = ["async"]
+
+[[example]]
+name = "stepper_until_press"
+required-features = ["async"]
 
 [build-dependencies]
 libtock_build_scripts = { path = "build_scripts" }
@@ -80,6 +117,7 @@ members = [
     "apis/peripherals/i2c_master",
     "apis/peripherals/i2c_master_slave",
     "apis/peripherals/rng",
+    "apis/peripherals/stepper",
     "apis/sensors/air_quality",
     "apis/sensors/ambient_light",
     "apis/sensors/ninedof",
@@ -87,6 +125,7 @@ members = [
     "apis/sensors/proximity",
     "apis/sensors/temperature",
     "apis/storage/key_value",
+    "async",
     "libraries/embedded_graphics_libtock",
     "panic_handlers/debug_panic",
     "panic_handlers/small_panic",
