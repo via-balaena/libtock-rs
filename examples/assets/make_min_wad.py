@@ -103,8 +103,17 @@ def parse_switchlist(engine, episode):
 
 
 def parse_enum(src, typename):
-    """A C enum's members in order, as name -> index."""
-    m = re.search(r"typedef\s+enum\s*\{(.*?)\}\s*" + typename + r"\s*;", src, re.S)
+    """A C enum's members in order, as name -> index.
+
+    The body is matched as `[^{}]*`, NOT `.*?`. An enum body contains no
+    braces, so this cannot span two of them -- whereas `.*?` anchored at the
+    first `typedef enum {` in the file happily swallowed spritenum_t AND
+    statenum_t as one enum, yielding 1106 names for a 967-entry table with
+    every index shifted. Everything downstream still looked plausible: the
+    sprite keep-set kept the right NUMBER of sprites and the wrong ones, and
+    blanked the player's pistol.
+    """
+    m = re.search(r"typedef\s+enum\s*\{([^{}]*)\}\s*" + typename + r"\s*;", src, re.S)
     if not m:
         sys.exit(f"could not find enum {typename}")
     names = []
@@ -157,6 +166,15 @@ def parse_actor_tables(engine):
     state_sprite = [e[0][4:] for e in entries]
     state_next = [statenum.get(e[1], 0) for e in entries]
 
+    # The enum and the table must agree, or every index is off and the result
+    # is a keep-set that looks reasonable and is wrong. NUMSTATES is the
+    # trailing count member, hence the +1.
+    if len(statenum) != len(entries) + 1:
+        sys.exit(f"statenum_t has {len(statenum)} members but states[] has "
+                 f"{len(entries)} entries -- the enum parse is wrong")
+    if statenum.get("S_NULL") != 0:
+        sys.exit("S_NULL is not state 0 -- the enum parse is wrong")
+
     # mobjinfo[]: one brace-delimited block per type, fields in struct order.
     m = re.search(r"mobjinfo\[NUMMOBJTYPES\]\s*=\s*\{(.*)\n\};", info_c, re.S)
     if not m:
@@ -190,6 +208,10 @@ def parse_actor_tables(engine):
         mobjs.append(entry)
     if len(mobjs) < 100:
         sys.exit(f"mobjinfo[] parsed to only {len(mobjs)} entries")
+    mobjtype = parse_enum(info_h, "mobjtype_t")
+    if len(mobjtype) != len(mobjs) + 1:
+        sys.exit(f"mobjtype_t has {len(mobjtype)} members but mobjinfo[] has "
+                 f"{len(mobjs)} entries -- the enum parse is wrong")
     return state_sprite, state_next, mobjs
 
 
@@ -529,18 +551,27 @@ def main():
                 out.append((name, data[pos:pos + size]))
                 sprite_bytes += size
                 kept_sprites += 1
-            elif name[:4] not in seen_blank:
-                # ONE lump for a sprite that cannot be spawned, not one per
-                # frame. R_InitSpriteDefs needs a sprite to have at least one
-                # lump and its frames to be consistent; frame A rotation 0 is
-                # the smallest set that satisfies both, and every other lump
-                # for this sprite is a directory entry Doom would carry for
-                # nothing. The entry costs 28 bytes of lumpinfo in RAM, which
-                # is the binding constraint on this board.
-                seen_blank.add(name[:4])
-                out.append((name[:4] + "A0", blank))
-                sprite_bytes += len(blank)
-                dummied += 1
+            else:
+                # ONE BLANK PER FRAME LETTER, not one per sprite.
+                #
+                # Collapsing a blanked sprite to a single A0 lump saves
+                # directory entries and is UNSOUND: it leaves maxframe at 0, so
+                # any state that reaches frame B or later dies in
+                # R_ProjectSprite -- mid-game, not at boot. It did exactly
+                # that. Keeping one rotation-0 lump per frame letter the source
+                # had preserves maxframe and every frame index, which is what
+                # makes a mistrimmed sprite invisible instead of fatal, while
+                # still dropping every rotation.
+                for letter in (name[4:5], name[6:7]):
+                    if not letter:
+                        continue
+                    key = name[:4] + letter
+                    if key in seen_blank:
+                        continue
+                    seen_blank.add(key)
+                    out.append((key + "0", blank))
+                    sprite_bytes += len(blank)
+                    dummied += 1
         out.append(("S_END", b""))
 
     body, directory, off = [], [], 12

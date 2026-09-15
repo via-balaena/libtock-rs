@@ -56,20 +56,74 @@ const DOOM_W: usize = 320;
 const DOOM_H: usize = 200;
 const PANEL_W: u32 = 480;
 const PANEL_H: u32 = 320;
-const ORIGIN_X: u32 = (PANEL_W - DOOM_W as u32) / 2;
-const ORIGIN_Y: u32 = (PANEL_H - DOOM_H as u32) / 2;
+/// Doom's frame is SCALED to fill the panel, not centred in it.
+///
+/// 320x200 in the middle of a 480x320 panel lights 64,000 of 153,600 pixels --
+/// 41% of the glass, with a border on every side. Filling it costs 2.4x the
+/// pixels to convert and blit per frame, which is why it was centred until the
+/// unscaled cost had been measured.
+///
+/// The stretch is 1.5x across and 1.6x down, which is not uniform and is MORE
+/// faithful than 1:1, not less: Doom's 320x200 was drawn for a 4:3 display, so
+/// its pixels are about 1.2 times taller than wide. Filling this panel lands
+/// near that, where an unscaled picture is square-pixelled and slightly squat.
+const ORIGIN_X: u32 = 0;
+const ORIGIN_Y: u32 = 0;
 
-/// Rows per blit. 50 was the fastest band `kit_doom_frame` measured and costs
-/// 32,000 bytes of staging; it divides 200 exactly, so no band is short.
-const BAND: usize = 10;
-const STAGE_BYTES: usize = DOOM_W * BAND * 2;
+/// Output rows per blit.
+///
+/// This does NOT have to fit the kernel's screen buffer. The screen capsule
+/// chunks a larger userspace write into buffer-sized pieces itself and passes
+/// `continue_write: true` for every piece after the first, so the panel's
+/// column and row address are set ONCE per userspace write, not once per
+/// chunk. Sizing bands to the kernel buffer therefore bought nothing and cost
+/// a CASET/RASET sequence every 4,800 bytes.
+///
+/// Measured at 5 rows: 64 bands a frame and 51 ms of `set_write_frame` alone,
+/// out of a 207 ms frame. 20 divides 320 exactly and makes that 16 bands.
+const BAND: usize = 20;
+const STAGE_BYTES: usize = PANEL_W as usize * BAND * 2;
+
+/// Source column per output column, and source row per output row. Built once:
+/// a division per pixel, 153,600 times a frame, is not free and a lookup is.
+static mut XMAP: [u16; PANEL_W as usize] = [0; PANEL_W as usize];
+static mut YMAP: [u16; PANEL_H as usize] = [0; PANEL_H as usize];
+
+/// One converted output row, reused when consecutive output rows come from the
+/// same source row. Scaling 200 rows to 320 means most source rows feed two
+/// output rows, so building the line once and copying it removes about a third
+/// of the palette lookups.
+static mut LINE: [u8; PANEL_W as usize * 2] = [0; PANEL_W as usize * 2];
+
+/// Milliseconds spent converting and blitting, and bytes blitted, since boot.
+///
+/// Per-band timing at 1 ms resolution is far too coarse for one band, but the
+/// error is unbiased and there are tens of thousands of samples, so the sums
+/// converge. What this answers is the only question that matters here: of a
+/// 190 ms frame, how much is the panel and how much is everything else.
+static mut CONV_MS: u64 = 0;
+static mut BLIT_MS: u64 = 0;
+static mut FRAME_MS: u64 = 0;
+static mut BLIT_BYTES: u64 = 0;
+
+fn build_scale_maps() {
+    // SAFETY: single-threaded setup, before any frame is drawn.
+    unsafe {
+        for (x, slot) in (*addr_of_mut!(XMAP)).iter_mut().enumerate() {
+            *slot = (x * DOOM_W / PANEL_W as usize) as u16;
+        }
+        for (y, slot) in (*addr_of_mut!(YMAP)).iter_mut().enumerate() {
+            *slot = (y * DOOM_H / PANEL_H as usize) as u16;
+        }
+    }
+}
 
 /// What the shim's allocator hands out. Doom's zone takes nearly all of it in
 /// one call, so this and `ZONE_KIB` move together.
-const HEAP_BYTES: usize = 268 * 1024;
+const HEAP_BYTES: usize = 288 * 1024;
 /// Passed to Doom as `-kb`. Leaves the heap a few KiB for the handful of
 /// strings Doom duplicates outside the zone.
-const ZONE_KIB: usize = 236;
+const ZONE_KIB: usize = 256;
 
 /// The panel spends over a second in its init sequence and answers BUSY until
 /// it is done. Measured at 1225 ms from userspace.
@@ -166,6 +220,10 @@ pub extern "C" fn tock_ticks_ms() -> u32 {
 extern "C" {
     fn tock_alloc_stats(used: *mut usize, peak: *mut usize,
                         calls: *mut u32, dropped: *mut u32);
+    /// Doom's own zone: peak, current, total free, and the LARGEST run it
+    /// could satisfy. The last two differ by exactly the fragmentation, and
+    /// an allocation fails on the largest run, not on the total.
+    fn DG_ZoneStats(peak: *mut i32, now: *mut i32, free: *mut i32, largest: *mut i32);
 }
 
 /// Deepest the stack has been, by painting it and looking for the paint.
@@ -231,6 +289,22 @@ fn report_budget<W: Write>(console: &mut W) {
     let _ = writeln!(console,
         "doom: stack {used} of {total} used; heap peak {hpeak} of {HEAP_BYTES} \
          in {calls} calls, {dropped} frees dropped");
+    let (mut zp, mut zn, mut zf, mut zl) = (0i32, 0i32, 0i32, 0i32);
+    // SAFETY: four out-pointers to locals, which is what DG_ZoneStats expects.
+    unsafe { DG_ZoneStats(&mut zp, &mut zn, &mut zf, &mut zl) }
+    let _ = writeln!(
+        console,
+        "doom: zone {} KiB: peak {zp}, now {zn}, free {zf}, largest run {zl}",
+        ZONE_KIB
+    );
+    // SAFETY: single-threaded read of values the frame path writes.
+    let (cms, fms, bms, bb) = unsafe { (CONV_MS, FRAME_MS, BLIT_MS, BLIT_BYTES) };
+    let kbs = if bms > 0 { bb / bms } else { 0 };
+    let _ = writeln!(
+        console,
+        "doom: convert {cms} ms, set_frame {fms} ms, write {bms} ms, \
+         {bb} bytes -> {kbs} kB/s in the writes alone"
+    );
 }
 
 #[no_mangle]
@@ -509,19 +583,59 @@ pub extern "C" fn DG_DrawFrame() {
     let pal = unsafe { &*addr_of_mut!(PALETTE) };
     let stage = unsafe { &mut *addr_of_mut!(STAGE) };
 
+    // SAFETY: built once at startup, read-only after.
+    let (xmap, ymap) = unsafe { (&*addr_of_mut!(XMAP), &*addr_of_mut!(YMAP)) };
+
     let mut y = 0usize;
-    while y < DOOM_H {
-        let rows = core::cmp::min(BAND, DOOM_H - y);
-        let pixels = rows * DOOM_W;
-        for (i, &idx) in fb[y * DOOM_W..y * DOOM_W + pixels].iter().enumerate() {
-            let c = pal[idx as usize];
-            // High byte first: the order hil::screen documents and the ST7796
-            // takes.
-            stage[i * 2] = (c >> 8) as u8;
-            stage[i * 2 + 1] = c as u8;
+    while y < PANEL_H as usize {
+        let t_begin = Alarm::get_milliseconds().unwrap_or(0);
+        let rows = core::cmp::min(BAND, PANEL_H as usize - y);
+        let mut out = 0usize;
+        let mut built: usize = usize::MAX;
+        for row in 0..rows {
+            let src = ymap[y + row] as usize;
+            if src != built {
+                let base = src * DOOM_W;
+                // SAFETY: xmap holds source columns < DOOM_W and base is a row
+                // start within the framebuffer, so every index is in range by
+                // construction. The bounds checks cost more than the lookup in
+                // a loop that runs 153,600 times a frame.
+                unsafe {
+                    let line = &mut *addr_of_mut!(LINE);
+                    for (x, &sx) in xmap.iter().enumerate() {
+                        let c = *pal.get_unchecked(*fb.get_unchecked(base + sx as usize) as usize);
+                        // High byte first: the order hil::screen documents and
+                        // the ST7796 takes.
+                        *line.get_unchecked_mut(x * 2) = (c >> 8) as u8;
+                        *line.get_unchecked_mut(x * 2 + 1) = c as u8;
+                    }
+                }
+                built = src;
+            }
+            // SAFETY: LINE is exactly one output row and `out` advances by
+            // that much per row, within STAGE_BYTES = PANEL_W * BAND * 2.
+            unsafe {
+                let line = &*addr_of_mut!(LINE);
+                core::ptr::copy_nonoverlapping(
+                    line.as_ptr(),
+                    stage.as_mut_ptr().add(out),
+                    line.len(),
+                );
+            }
+            out += PANEL_W as usize * 2;
         }
-        let ok = Screen::set_write_frame(ORIGIN_X, ORIGIN_Y + y as u32, DOOM_W as u32, rows as u32)
-            .and_then(|()| Screen::write(&stage[..pixels * 2]));
+        let t_mid = Alarm::get_milliseconds().unwrap_or(0);
+        let framed = Screen::set_write_frame(ORIGIN_X, ORIGIN_Y + y as u32, PANEL_W, rows as u32);
+        let t_framed = Alarm::get_milliseconds().unwrap_or(0);
+        let ok = framed.and_then(|()| Screen::write(&stage[..out]));
+        let t_end = Alarm::get_milliseconds().unwrap_or(0);
+        // SAFETY: single-threaded, only writer.
+        unsafe {
+            CONV_MS += t_mid.saturating_sub(t_begin);
+            FRAME_MS += t_framed.saturating_sub(t_mid);
+            BLIT_MS += t_end.saturating_sub(t_framed);
+            BLIT_BYTES += out as u64;
+        }
         if ok.is_err() {
             return; // a dropped frame is better than a wedged game
         }
@@ -562,7 +676,7 @@ static mut ARG0: [u8; 5] = *b"doom\0";
 static mut ARG_IWAD: [u8; 6] = *b"-iwad\0";
 static mut ARG_WAD: [u8; 9] = *b"doom.wad\0";
 static mut ARG_KB: [u8; 4] = *b"-kb\0";
-static mut ARG_KB_N: [u8; 8] = *b"236\0\0\0\0\0";
+static mut ARG_KB_N: [u8; 8] = *b"256\0\0\0\0\0";
 /* Straight into the map. Without this Doom starts at the title screen and
  * wants TITLEPIC, the demo lumps and the rest of the attract loop -- none of
  * which a WAD trimmed to one map carries, and none of which this build is
@@ -584,6 +698,7 @@ fn main() {
     if !wait_ready(&mut console) {
         return;
     }
+    build_scale_maps();
 
     // SAFETY: single-threaded setup, before any C code runs.
     unsafe {
