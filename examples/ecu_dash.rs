@@ -150,7 +150,50 @@ fn main() {
     let _ = writeln!(console, "dash: {w}x{h}");
 
     // Paint the whole panel once. Everything after this is small updates.
-    rect(0, 0, w, h, BG);
+    //
+    // THE FIRST DRAW HAS TO WAIT, AND NOTHING TELLS YOU SO. Measured on a
+    // Pico 2 W with the kit's ST7796: every `set_write_frame` answers BUSY
+    // for the first **1,246 ms** after boot, then works, and the full-screen
+    // fill that follows takes 81 ms. Both BUSY sources in
+    // `capsules/extra/src/screen/screen.rs:149` are the app's own
+    // `pending_command`, not the panel -- and `Screen::exists()` and
+    // `get_resolution()` are answered by the capsule without touching the
+    // driver, so they succeed immediately and tell an app nothing. There is
+    // no "screen ready" signal in the syscall API.
+    //
+    // An app that clears once and drops the error -- which is what a helper
+    // like `rect` below quietly does -- leaves the PREVIOUS app's frozen
+    // image showing through everywhere it does not draw. That is exactly how
+    // this dash first came up: a working dash rendered over a still frame of
+    // Doom. Retry until it takes.
+    let hz = Alarm::get_frequency().map(|f| f.0).unwrap_or(1);
+    let t0 = Alarm::get_ticks().unwrap_or(0);
+    let mut attempts = 0u32;
+    let mut frame: Result<(), ErrorCode> = Err(ErrorCode::Busy);
+    while attempts < 200 {
+        attempts += 1;
+        frame = Screen::set_write_frame(0, 0, w, h);
+        if frame.is_ok() {
+            break;
+        }
+        let _ = Alarm::sleep_for(Milliseconds(25));
+    }
+    let t1 = Alarm::get_ticks().unwrap_or(0);
+    let mut buf = [0u8; 2];
+    let fill = if frame.is_ok() {
+        Screen::fill(&mut buf, BG)
+    } else {
+        Err(ErrorCode::Busy)
+    };
+    let t2 = Alarm::get_ticks().unwrap_or(0);
+    let ms = |a: u32, b: u32| b.wrapping_sub(a) as u64 * 1000 / hz.max(1) as u64;
+    let _ = writeln!(
+        console,
+        "dash: clear frame={frame:?} after {attempts} tries / {} ms, \
+         fill={fill:?} in {} ms",
+        ms(t0, t1),
+        ms(t1, t2),
+    );
 
     let _ = TockSyscalls::command(COUNTER, C_START, 0, 0).to_result::<(), ErrorCode>();
 
@@ -188,6 +231,11 @@ fn main() {
     let mut locked_out = false;
     let mut tick: u32 = 0;
     let mut wheel_on = false;
+    // Highest value each has ever reached. The joystick is only moved when
+    // somebody is at the bench, and the console is only read when somebody is
+    // not -- a once-a-second sample of a live value never catches the two
+    // together.
+    let (mut pk_pedal, mut pk_target, mut pk_actual, mut pk_pps) = (0u16, 0u32, 0u32, 0u32);
     let mut set_errs: u32 = 0;
     let mut wheel_errs: u32 = 0;
 
@@ -287,11 +335,17 @@ fn main() {
         // One line a second. The glass carries the same numbers, but a bench
         // session driven over SSH cannot see the glass, and a dash that only
         // draws is indistinguishable from a dash that has stopped drawing.
+        pk_pedal = pk_pedal.max(raw);
+        pk_target = pk_target.max(target);
+        pk_actual = pk_actual.max(actual);
+        pk_pps = pk_pps.max(pps);
+
         tick = tick.wrapping_add(1);
         if tick % 10 == 0 {
             let _ = writeln!(
                 console,
                 "dash: pedal={raw} target={target} actual={actual} pps={pps} \
+                 peak={pk_pedal}/{pk_target}/{pk_actual}/{pk_pps} \
                  set_err={set_errs} wheel_err={wheel_errs} {}{}{}{}",
                 if faulted { "FAULT " } else { "" },
                 if braking { "BRAKE " } else { "" },
