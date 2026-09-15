@@ -182,6 +182,12 @@ impl<S: Syscalls, const N: usize> platform::async_call::BufferedOperation<S, N> 
         // nowhere to put the bytes. Command 3 aborts the receive and reports
         // what arrived so far; that upcall is discarded by the unsubscribe that
         // follows.
+        //
+        // The return value is discarded because it carries no information in
+        // either direction: the capsule answers command 3 with Ok
+        // unconditionally, and underneath it `UartDevice::receive_abort` returns
+        // Err(BUSY) even on the happy path. Verified against the kernel, not
+        // assumed.
         let _ = S::command(DRIVER_NUM, command::ABORT, 0, 0);
     }
 
