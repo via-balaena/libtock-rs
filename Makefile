@@ -54,9 +54,16 @@ toolchain:
 # of two for an MPU constraint ARMv8-M does not have. Only cortex-m33 platforms
 # pass the flag, so a stock elf2tab still builds every other board -- but a
 # stock one will reject the flag outright, so this is what `make setup` gets.
+#
+# BRANCH `main`, NOT `master`. That fork was restructured on 2026-09-14 to
+# match every other repo here -- `main` is ours, `master` tracks upstream --
+# so `master` no longer carries the flag. This line still said `master` and
+# quietly installed a stock elf2tab; the symptom was `make <board>
+# EXAMPLE=doom` dying with "unexpected argument '--trailing-padding' found"
+# long after the restructure, with nothing pointing back at it.
 .PHONY: setup
 setup: setup-qemu toolchain
-	cargo install --git https://github.com/via-balaena/elf2tab --branch master elf2tab
+	cargo install --git https://github.com/via-balaena/elf2tab --branch main elf2tab
 
 # Sets up QEMU in the tock/ directory. We use Tock's QEMU which may contain
 # patches to better support boards that Tock supports.
