@@ -22,7 +22,8 @@ const PIN: u32 = 0; // index into the driver's pin array; GP16 on this board
 
 fn main() {
     let mut c = Console::writer();
-    if TockSyscalls::command(DRIVER_NUM, 0, 0, 0).to_result::<(), libtock::platform::ErrorCode>()
+    if TockSyscalls::command(DRIVER_NUM, 0, 0, 0)
+        .to_result::<(), libtock::platform::ErrorCode>()
         .is_err()
     {
         writeln!(c, "[A] leak-demo driver unavailable").unwrap();

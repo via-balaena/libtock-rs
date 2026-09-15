@@ -16,12 +16,26 @@ version = "0.1.0"
 rust-version = "1.87"
 
 [features]
+# The examples that embed a generated IWAD with `include_bytes!`. That file is
+# derived output and is not checked in -- see examples/assets/.gitignore --
+# so build it with examples/assets/make_min_wad.py before enabling this.
+# Without the gate those examples fail to compile in any fresh checkout.
+wad = []
+
+# kit_doom_frame holds a 320x200 frame buffer. That is ~66K more RAM than the
+# boards in the `examples` matrix have (nrf52 gets 62K), so it cannot be built
+# there at all -- the gate keeps a default `make examples` from failing on a
+# board the example was never for. Unlike the async examples there is no second
+# pass that builds it, because both matrix boards are too small; it is built
+# for the kit by name.
+frame_probe = []
+
 # Compiles doomgeneric's C from the tree named by DOOM_SRC and links it in.
 # That C is GPL-2.0-only, so a binary built with this feature on may only be
 # distributed under GPL-2.0-only. See LICENSE-DOOM.
 # Kept behind a feature because it needs that tree and a clang that can target
 # the board, which no other example does.
-doom = []
+doom = ["wad"]
 
 rust_embedded = [
     "embedded-hal",
@@ -75,6 +89,14 @@ embedded-hal = { version = "1.0", optional = true }
 [[example]]
 name = "doom"
 required-features = ["doom"]
+
+[[example]]
+name = "kit_wad_xip"
+required-features = ["wad"]
+
+[[example]]
+name = "kit_doom_frame"
+required-features = ["frame_probe"]
 
 [[example]]
 name = "async_sleep"

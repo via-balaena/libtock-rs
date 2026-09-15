@@ -40,16 +40,16 @@
 #![no_main]
 #![no_std]
 
+use core::cell::Cell;
 use core::fmt::Write;
 use core::ptr::addr_of_mut;
-use core::cell::Cell;
 use libtock::adc::{ADCListener, Adc};
-use libtock::platform::{Syscalls, share};
-use libtock::runtime::TockSyscalls;
 use libtock::alarm::{Alarm, Milliseconds};
 use libtock::buttons::Buttons;
 use libtock::console::Console;
 use libtock::display::Screen;
+use libtock::platform::{share, Syscalls};
+use libtock::runtime::TockSyscalls;
 use libtock::runtime::{set_main, stack_size};
 
 set_main! {main}
@@ -225,8 +225,7 @@ pub extern "C" fn tock_ticks_ms() -> u32 {
 
 /// The shim's own accounting, which nothing has read back until now.
 extern "C" {
-    fn tock_alloc_stats(used: *mut usize, peak: *mut usize,
-                        calls: *mut u32, dropped: *mut u32);
+    fn tock_alloc_stats(used: *mut usize, peak: *mut usize, calls: *mut u32, dropped: *mut u32);
     /// Doom's own zone: peak, current, total free, and the LARGEST run it
     /// could satisfy. The last two differ by exactly the fragmentation, and
     /// an allocation fails on the largest run, not on the total.
@@ -293,9 +292,11 @@ fn report_budget<W: Write>(console: &mut W) {
     let (mut calls, mut dropped) = (0u32, 0u32);
     // SAFETY: four out-pointers to locals, which is what the shim expects.
     unsafe { tock_alloc_stats(&mut hused, &mut hpeak, &mut calls, &mut dropped) }
-    let _ = writeln!(console,
+    let _ = writeln!(
+        console,
         "doom: stack {used} of {total} used; heap peak {hpeak} of {HEAP_BYTES} \
-         in {calls} calls, {dropped} frees dropped");
+         in {calls} calls, {dropped} frees dropped"
+    );
     let (mut zp, mut zn, mut zf, mut zl) = (0i32, 0i32, 0i32, 0i32);
     // SAFETY: four out-pointers to locals, which is what DG_ZoneStats expects.
     unsafe { DG_ZoneStats(&mut zp, &mut zn, &mut zf, &mut zl) }
@@ -749,7 +750,10 @@ fn main() {
             let _ = writeln!(console, "doom: {n} analogue channels for the stick");
         }
         Err(e) => {
-            let _ = writeln!(console, "doom: NO ADC DRIVER ({e:?}) -- no stick, no movement");
+            let _ = writeln!(
+                console,
+                "doom: NO ADC DRIVER ({e:?}) -- no stick, no movement"
+            );
         }
     }
 

@@ -43,7 +43,10 @@ fn main() {
     );
 
     if SpiController::exists().is_err() {
-        let _ = writeln!(Console::writer(), "  no SPI controller driver on this board\r");
+        let _ = writeln!(
+            Console::writer(),
+            "  no SPI controller driver on this board\r"
+        );
         return;
     }
 

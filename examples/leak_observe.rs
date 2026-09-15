@@ -43,7 +43,11 @@ fn main() {
     Alarm::sleep_for(Milliseconds(4000)).unwrap();
 
     writeln!(c, "").unwrap();
-    writeln!(c, "[B] --- process A has exited; LED should still be lit ---").unwrap();
+    writeln!(
+        c,
+        "[B] --- process A has exited; LED should still be lit ---"
+    )
+    .unwrap();
     query(&mut c, "before");
     try_claim(&mut c, "before");
 
