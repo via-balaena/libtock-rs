@@ -39,8 +39,8 @@ use libtock::adc::Adc;
 use libtock::alarm::{Alarm, Milliseconds};
 use libtock::buttons::Buttons;
 use libtock::console::Console;
-use libtock::runtime::{set_main, stack_size};
 use libtock::display::Screen;
+use libtock::runtime::{set_main, stack_size};
 use libtock_platform::{ErrorCode, Syscalls};
 use libtock_runtime::TockSyscalls;
 
@@ -72,6 +72,11 @@ const AMBER: u16 = 0xFD20;
 const RED: u16 = 0xF800;
 const WHITE: u16 = 0xFFFF;
 
+/// Frequency the preflight drives the wheel source at. Far enough above the
+/// counter's 4 pps resolution that "heard nothing" and "heard it" cannot be
+/// confused, and inside the range a real wheel will reach.
+const PREFLIGHT_HZ: u32 = 400;
+
 const PEDAL_CH: u32 = 0;
 const BRAKE_BTN: u32 = 0;
 const BAND_LOW: u16 = 1_500;
@@ -92,34 +97,42 @@ fn rect(x: u32, y: u32, w: u32, h: u32, colour: u16) {
 /// Which of the seven segments each digit lights, in the order
 /// a, b, c, d, e, f, g.
 const SEGMENTS: [[bool; 7]; 10] = [
-    [true, true, true, true, true, true, false],      // 0
-    [false, true, true, false, false, false, false],  // 1
-    [true, true, false, true, true, false, true],     // 2
-    [true, true, true, true, false, false, true],     // 3
-    [false, true, true, false, false, true, true],    // 4
-    [true, false, true, true, false, true, true],     // 5
-    [true, false, true, true, true, true, true],      // 6
-    [true, true, true, false, false, false, false],   // 7
-    [true, true, true, true, true, true, true],       // 8
-    [true, true, true, true, false, true, true],      // 9
+    [true, true, true, true, true, true, false],     // 0
+    [false, true, true, false, false, false, false], // 1
+    [true, true, false, true, true, false, true],    // 2
+    [true, true, true, true, false, false, true],    // 3
+    [false, true, true, false, false, true, true],   // 4
+    [true, false, true, true, false, true, true],    // 5
+    [true, false, true, true, true, true, true],     // 6
+    [true, true, true, false, false, false, false],  // 7
+    [true, true, true, true, true, true, true],      // 8
+    [true, true, true, true, false, true, true],     // 9
 ];
+
+/// All three speed digits share one geometry, so it lives here rather than in
+/// the signature.
+const DIGIT_Y: u32 = 40;
+const DIGIT_W: u32 = 100;
+const DIGIT_H: u32 = 160;
+const DIGIT_T: u32 = 18;
 
 /// Draw one digit, lighting segments in `on` and painting the rest in `off`
 /// so the previous value is erased without clearing the whole area first.
-fn digit(x: u32, y: u32, w: u32, h: u32, t: u32, value: Option<u8>, on: u16, off: u16) {
+fn digit(x: u32, value: Option<u8>, on: u16, off: u16) {
+    let (y, w, h, t) = (DIGIT_Y, DIGIT_W, DIGIT_H, DIGIT_T);
     let lit = match value {
         Some(v) if (v as usize) < 10 => SEGMENTS[v as usize],
         _ => [false; 7],
     };
     let half = h / 2;
     let boxes = [
-        (x, y, w, t),                    // a  top
-        (x + w - t, y, t, half),         // b  upper right
-        (x + w - t, y + half, t, half),  // c  lower right
-        (x, y + h - t, w, t),            // d  bottom
-        (x, y + half, t, half),          // e  lower left
-        (x, y, t, half),                 // f  upper left
-        (x, y + half - t / 2, w, t),     // g  middle
+        (x, y, w, t),                   // a  top
+        (x + w - t, y, t, half),        // b  upper right
+        (x + w - t, y + half, t, half), // c  lower right
+        (x, y + h - t, w, t),           // d  bottom
+        (x, y + half, t, half),         // e  lower left
+        (x, y, t, half),                // f  upper left
+        (x, y + half - t / 2, w, t),    // g  middle
     ];
     for (i, (bx, by, bw, bh)) in boxes.iter().enumerate() {
         rect(*bx, *by, *bw, *bh, if lit[i] { on } else { off });
@@ -140,14 +153,47 @@ fn main() {
     rect(0, 0, w, h, BG);
 
     let _ = TockSyscalls::command(COUNTER, C_START, 0, 0).to_result::<(), ErrorCode>();
+
+    // Preflight. Drive the wheel source at a frequency this app chose and ask
+    // the counter what it heard. That covers the jumper, the pad mux and the
+    // counter in one step, BEFORE the dash starts showing a speed that depends
+    // on all three -- a dash reading zero is otherwise the same picture whether
+    // the wheel is stopped or the wire is off.
+    let started = TockSyscalls::command(PWM, PWM_START, WHEEL_PIN | (5000 << 16), PREFLIGHT_HZ)
+        .to_result::<(), ErrorCode>();
+    // Two counter windows, so the reading is a full window rather than a
+    // partial one that would read low and look like a fault.
+    let _ = Alarm::sleep_for(Milliseconds(600));
+    let heard = TockSyscalls::command(COUNTER, C_RATE, 0, 0)
+        .to_result::<u32, ErrorCode>()
+        .unwrap_or(0);
+    let _ = TockSyscalls::command(PWM, PWM_STOP, WHEEL_PIN, 0).to_result::<(), ErrorCode>();
+    let wheel_ok = started.is_ok() && heard.abs_diff(PREFLIGHT_HZ) <= PREFLIGHT_HZ / 10;
+    let _ = writeln!(
+        console,
+        "dash: preflight {PREFLIGHT_HZ} Hz -> {heard} pps -- {}",
+        if wheel_ok {
+            "wheel path ok"
+        } else {
+            "NO WHEEL SIGNAL, check the GP20-GP21 jumper"
+        }
+    );
+    // Top left, painted once and never redrawn: green if the speed on this
+    // dash came through a wire, amber if the number is meaningless.
+    rect(20, 8, 24, 20, if wheel_ok { GREEN } else { AMBER });
+
     let _ = TockSyscalls::command(THROTTLE, T_ARM, 0, 0).to_result::<(), ErrorCode>();
 
     let mut ever_at_rest = false;
     let mut locked_out = false;
+    let mut tick: u32 = 0;
+    let mut wheel_on = false;
+    let mut set_errs: u32 = 0;
+    let mut wheel_errs: u32 = 0;
 
     loop {
         let raw = Adc::read_single_sample_sync(PEDAL_CH).unwrap_or(PEDAL_REST);
-        let faulted = raw < BAND_LOW || raw > BAND_HIGH;
+        let faulted = !(BAND_LOW..=BAND_HIGH).contains(&raw);
 
         let at_rest = raw <= PEDAL_REST;
         if at_rest {
@@ -165,7 +211,12 @@ fn main() {
             let span = (PEDAL_FULL - PEDAL_REST) as u32;
             (raw.min(PEDAL_FULL) - PEDAL_REST) as u32 * SCALE / span
         };
-        let _ = TockSyscalls::command(THROTTLE, T_SET, target, 0).to_result::<(), ErrorCode>();
+        if TockSyscalls::command(THROTTLE, T_SET, target, 0)
+            .to_result::<(), ErrorCode>()
+            .is_err()
+        {
+            set_errs = set_errs.wrapping_add(1);
+        }
 
         let actual = TockSyscalls::command(THROTTLE, T_ACTUAL, 0, 0)
             .to_result::<u32, ErrorCode>()
@@ -173,13 +224,23 @@ fn main() {
 
         // The wheel. Frequency rises with the throttle, so the number on the
         // dash comes back through a wire rather than from this loop.
-        if actual == 0 {
-            let _ = TockSyscalls::command(PWM, PWM_STOP, WHEEL_PIN, 0).to_result::<(), ErrorCode>();
-        } else {
+        // Stopping a pin that is not running is ErrorCode::OFF (pwm.rs:175), so
+        // the stop goes on the transition only. Without that the closed
+        // throttle produced ten failed syscalls a second, which buried a real
+        // failure of this call in noise.
+        let want_wheel = actual > 0;
+        let wheel = if want_wheel {
             let hz = 40 + actual * 960 / SCALE;
             let packed = WHEEL_PIN | (5000 << 16);
-            let _ =
-                TockSyscalls::command(PWM, PWM_START, packed, hz).to_result::<(), ErrorCode>();
+            TockSyscalls::command(PWM, PWM_START, packed, hz).to_result::<(), ErrorCode>()
+        } else if wheel_on {
+            TockSyscalls::command(PWM, PWM_STOP, WHEEL_PIN, 0).to_result::<(), ErrorCode>()
+        } else {
+            Ok(())
+        };
+        match wheel {
+            Ok(()) => wheel_on = want_wheel,
+            Err(_) => wheel_errs = wheel_errs.wrapping_add(1),
         }
 
         let pps = TockSyscalls::command(COUNTER, C_RATE, 0, 0)
@@ -197,13 +258,14 @@ fn main() {
         } else {
             GREEN
         };
-        digit(30, 40, 100, 160, 18, if d0 > 0 { Some(d0 as u8) } else { None }, colour, BG);
+        digit(30, if d0 > 0 { Some(d0 as u8) } else { None }, colour, BG);
         digit(
-            150, 40, 100, 160, 18,
+            150,
             if shown >= 10 { Some(d1 as u8) } else { None },
-            colour, BG,
+            colour,
+            BG,
         );
-        digit(270, 40, 100, 160, 18, Some(d2 as u8), colour, BG);
+        digit(270, Some(d2 as u8), colour, BG);
 
         // Throttle, as a bar across the bottom.
         let bar_w = w - 60;
@@ -221,6 +283,22 @@ fn main() {
             GREEN
         };
         rect(w - 60, 30, 40, 40, state);
+
+        // One line a second. The glass carries the same numbers, but a bench
+        // session driven over SSH cannot see the glass, and a dash that only
+        // draws is indistinguishable from a dash that has stopped drawing.
+        tick = tick.wrapping_add(1);
+        if tick % 10 == 0 {
+            let _ = writeln!(
+                console,
+                "dash: pedal={raw} target={target} actual={actual} pps={pps} \
+                 set_err={set_errs} wheel_err={wheel_errs} {}{}{}{}",
+                if faulted { "FAULT " } else { "" },
+                if braking { "BRAKE " } else { "" },
+                if locked_out { "LOCKOUT " } else { "" },
+                if ever_at_rest { "" } else { "NEEDS-REST" },
+            );
+        }
 
         let _ = Alarm::sleep_for(Milliseconds(100));
     }
