@@ -2,5 +2,6 @@
 /nightly/target
 /target
 /demos/*/Cargo.lock
+/demos/*/*/Cargo.lock
 /demos/*/target
 /demos/*/*/target
