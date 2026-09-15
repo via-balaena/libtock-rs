@@ -115,8 +115,12 @@ impl crate::fake::SyscallDriver for Screen {
 
             SCREEN_SETUP => command_return::success_u32(self.screen_setup.unwrap() as u32),
 
+            // Enqueued by the capsule (arm 2), so it completes in an upcall.
             SET_POWER => {
                 self.power.set(1);
+                self.share_ref
+                    .schedule_upcall(0, (0, 0, 0))
+                    .expect("Unable to schedule upcall {}");
                 command_return::success()
             }
 
@@ -147,8 +151,12 @@ impl crate::fake::SyscallDriver for Screen {
                 command_return::success()
             }
 
+            // Enqueued by the capsule (arm 6), like SET_INVERT_ON/OFF above.
             SET_INVERT => {
                 self.invert.set(argument0 != 0);
+                self.share_ref
+                    .schedule_upcall(0, (0, 0, 0))
+                    .expect("Unable to schedule upcall {}");
                 command_return::success()
             }
 
@@ -209,12 +217,11 @@ impl crate::fake::SyscallDriver for Screen {
                 }
             }
 
-            GET_ROTATION => {
-                self.share_ref
-                    .schedule_upcall(0, (0, 0, 0))
-                    .expect("Unable to schedule upcall {}");
-                crate::command_return::success_u32(self.rotation.get() as u32)
-            }
+            // Synchronous in the capsule: arm 21 answers with
+            // `CommandReturn::success_u32` and schedules NO upcall. The fake
+            // used to schedule one, which let a `get_rotation` that waited for
+            // an upcall pass here and hang on hardware.
+            GET_ROTATION => crate::command_return::success_u32(self.rotation.get() as u32),
 
             SET_ROTATION => {
                 if argument0 > 359 {

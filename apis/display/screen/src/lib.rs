@@ -24,13 +24,35 @@ impl<S: Syscalls, C: Config> Screen<S, C> {
         S::command(DRIVER_NUM, command::SCREEN_SETUP, 0, 0).to_result()
     }
 
-    /// Turn on Screen power
+    /// Set the screen power.
+    ///
+    /// Waits for completion. The capsule queues `SET_POWER` and reports the
+    /// outcome in an upcall, so returning on the command's own answer would
+    /// only mean the command was accepted -- and would let the next screen
+    /// call arrive while this one is still running, which is the one case
+    /// that still answers BUSY.
+    ///
+    /// `value == 0` is refused here rather than passed on. The capsule reads
+    /// `data1 != 0` as the power state, so 0 would mean "off"; whether this
+    /// wrapper should be able to send it has not been settled.
     pub fn set_power(value: usize) -> Result<(), ErrorCode> {
-        if value != 0 {
-            S::command(DRIVER_NUM, command::SET_POWER, value as u32, 0).to_result()
-        } else {
-            Err(ErrorCode::Invalid)
+        if value == 0 {
+            return Err(ErrorCode::Invalid);
         }
+        let called: Cell<Option<(u32,)>> = Cell::new(None);
+        share::scope(|subscribe| {
+            S::subscribe::<_, _, C, DRIVER_NUM, { subscribe::WRITE }>(subscribe, &called)?;
+            S::command(DRIVER_NUM, command::SET_POWER, value as u32, 0).to_result::<(), _>()?;
+            loop {
+                S::yield_wait();
+                if let Some((status,)) = called.get() {
+                    return match status {
+                        0 => Ok(()),
+                        error => Err(error.try_into().unwrap_or(ErrorCode::Fail)),
+                    };
+                }
+            }
+        })
     }
 
     /// Set screen brightness, wait for completion via subscribe
@@ -42,8 +64,11 @@ impl<S: Syscalls, C: Config> Screen<S, C> {
                 .to_result::<(), _>()?;
             loop {
                 S::yield_wait();
-                if let Some((_,)) = called.get() {
-                    return Ok(());
+                if let Some((status,)) = called.get() {
+                    return match status {
+                        0 => Ok(()),
+                        error => Err(error.try_into().unwrap_or(ErrorCode::Fail)),
+                    };
                 }
             }
         })
@@ -57,8 +82,11 @@ impl<S: Syscalls, C: Config> Screen<S, C> {
             S::command(DRIVER_NUM, command::SET_INVERT_ON, 0, 0).to_result::<(), _>()?;
             loop {
                 S::yield_wait();
-                if let Some((_,)) = called.get() {
-                    return Ok(());
+                if let Some((status,)) = called.get() {
+                    return match status {
+                        0 => Ok(()),
+                        error => Err(error.try_into().unwrap_or(ErrorCode::Fail)),
+                    };
                 }
             }
         })
@@ -72,20 +100,43 @@ impl<S: Syscalls, C: Config> Screen<S, C> {
             S::command(DRIVER_NUM, command::SET_INVERT_OFF, 0, 0).to_result::<(), _>()?;
             loop {
                 S::yield_wait();
-                if let Some((_,)) = called.get() {
-                    return Ok(());
+                if let Some((status,)) = called.get() {
+                    return match status {
+                        0 => Ok(()),
+                        error => Err(error.try_into().unwrap_or(ErrorCode::Fail)),
+                    };
                 }
             }
         })
     }
 
-    /// Set inversion using a numeric value (non-zero = on)
+    /// Set screen color inversion.
+    ///
+    /// Waits for completion, for the same reason as `set_power`, and to match
+    /// `set_invert_on` and `set_invert_off`, which issue the same kernel
+    /// operation and already wait.
+    ///
+    /// `value == 0` is refused here rather than passed on, so inversion is
+    /// turned off through `set_invert_off` instead. Whether that is intended
+    /// has not been settled.
     pub fn set_invert(value: usize) -> Result<(), ErrorCode> {
-        if value != 0 {
-            S::command(DRIVER_NUM, command::SET_INVERT, value as u32, 0).to_result()
-        } else {
-            Err(ErrorCode::Invalid)
+        if value == 0 {
+            return Err(ErrorCode::Invalid);
         }
+        let called: Cell<Option<(u32,)>> = Cell::new(None);
+        share::scope(|subscribe| {
+            S::subscribe::<_, _, C, DRIVER_NUM, { subscribe::WRITE }>(subscribe, &called)?;
+            S::command(DRIVER_NUM, command::SET_INVERT, value as u32, 0).to_result::<(), _>()?;
+            loop {
+                S::yield_wait();
+                if let Some((status,)) = called.get() {
+                    return match status {
+                        0 => Ok(()),
+                        error => Err(error.try_into().unwrap_or(ErrorCode::Fail)),
+                    };
+                }
+            }
+        })
     }
 
     /// Get the number of supported resolution modes
@@ -114,20 +165,16 @@ impl<S: Syscalls, C: Config> Screen<S, C> {
         S::command(DRIVER_NUM, command::PIXEL_FORMAT, index as u32, 0).to_result()
     }
 
-    /// Get the current rotation of the screen
+    /// Get the current rotation of the screen.
+    ///
+    /// Synchronous. The capsule answers `GET_ROTATION` with
+    /// `CommandReturn::success_u32` and schedules no upcall, so this must not
+    /// wait for one -- an earlier version subscribed and spun in `yield_wait`,
+    /// which returns only if some unrelated screen operation happens to
+    /// complete, and otherwise never. The unit test did not catch it because
+    /// the fake scheduled an upcall the kernel does not.
     pub fn get_rotation() -> Result<u32, ErrorCode> {
-        let called: Cell<Option<(u32,)>> = Cell::new(None);
-        share::scope(|subscribe| {
-            S::subscribe::<_, _, C, DRIVER_NUM, { subscribe::WRITE }>(subscribe, &called)?;
-            let val = S::command(DRIVER_NUM, command::GET_ROTATION, 0, 0).to_result();
-            val?;
-            loop {
-                S::yield_wait();
-                if let Some((_,)) = called.get() {
-                    return val;
-                }
-            }
-        })
+        S::command(DRIVER_NUM, command::GET_ROTATION, 0, 0).to_result()
     }
 
     /// Set the screen rotation
@@ -139,8 +186,11 @@ impl<S: Syscalls, C: Config> Screen<S, C> {
                 .to_result::<(), _>()?;
             loop {
                 S::yield_wait();
-                if let Some((_,)) = called.get() {
-                    return Ok(());
+                if let Some((status,)) = called.get() {
+                    return match status {
+                        0 => Ok(()),
+                        error => Err(error.try_into().unwrap_or(ErrorCode::Fail)),
+                    };
                 }
             }
         })
@@ -165,8 +215,11 @@ impl<S: Syscalls, C: Config> Screen<S, C> {
             .to_result::<(), _>()?;
             loop {
                 S::yield_wait();
-                if let Some((_,)) = called.get() {
-                    return Ok(());
+                if let Some((status,)) = called.get() {
+                    return match status {
+                        0 => Ok(()),
+                        error => Err(error.try_into().unwrap_or(ErrorCode::Fail)),
+                    };
                 }
             }
         })
@@ -186,8 +239,11 @@ impl<S: Syscalls, C: Config> Screen<S, C> {
                 .to_result::<(), _>()?;
             loop {
                 S::yield_wait();
-                if let Some((_,)) = called.get() {
-                    return Ok(());
+                if let Some((status,)) = called.get() {
+                    return match status {
+                        0 => Ok(()),
+                        error => Err(error.try_into().unwrap_or(ErrorCode::Fail)),
+                    };
                 }
             }
         })
@@ -203,8 +259,11 @@ impl<S: Syscalls, C: Config> Screen<S, C> {
             S::command(DRIVER_NUM, command::SET_WRITE_FRAME, data1, data2).to_result::<(), _>()?;
             loop {
                 S::yield_wait();
-                if let Some((_,)) = called.get() {
-                    return Ok(());
+                if let Some((status,)) = called.get() {
+                    return match status {
+                        0 => Ok(()),
+                        error => Err(error.try_into().unwrap_or(ErrorCode::Fail)),
+                    };
                 }
             }
         })
@@ -227,8 +286,11 @@ impl<S: Syscalls, C: Config> Screen<S, C> {
             S::command(DRIVER_NUM, command::WRITE, s.len() as u32, 0).to_result::<(), _>()?;
             loop {
                 S::yield_wait();
-                if let Some((_,)) = called.get() {
-                    return Ok(());
+                if let Some((status,)) = called.get() {
+                    return match status {
+                        0 => Ok(()),
+                        error => Err(error.try_into().unwrap_or(ErrorCode::Fail)),
+                    };
                 }
             }
         })
@@ -255,8 +317,11 @@ impl<S: Syscalls, C: Config> Screen<S, C> {
                 S::command(DRIVER_NUM, command::FILL, 0, 0).to_result::<(), _>()?;
                 loop {
                     S::yield_wait();
-                    if let Some((_,)) = called.get() {
-                        return Ok(());
+                    if let Some((status,)) = called.get() {
+                        return match status {
+                            0 => Ok(()),
+                            error => Err(error.try_into().unwrap_or(ErrorCode::Fail)),
+                        };
                     }
                 }
             })
