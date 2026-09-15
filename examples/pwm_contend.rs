@@ -68,6 +68,37 @@ fn main() {
     let _ = TockSyscalls::command(COUNTER, C_START, 0, 0).to_result::<(), ErrorCode>();
     let _ = TockSyscalls::command(THROTTLE, T_ARM, 0, 0).to_result::<(), ErrorCode>();
 
+    // FIRST: is the wire even there? Without this the test cannot tell
+    // "starved by the mux" from "the GP20-GP21 jumper fell out", and it
+    // reported STARVED for a missing jumper -- a test that names the wrong
+    // cause is worse than no test. The throttle is shut here, so nothing can
+    // be contending; anything but pulses means the bench, not the mux.
+    let _ = TockSyscalls::command(PWM, PWM_START, WHEEL_PIN | (5000 << 16), WHEEL_HZ)
+        .to_result::<(), ErrorCode>();
+    for _ in 0..24 {
+        let _ = Alarm::sleep_for(Milliseconds(25));
+    }
+    let baseline = TockSyscalls::command(COUNTER, C_RATE, 0, 0)
+        .to_result::<u32, ErrorCode>()
+        .unwrap_or(0);
+    let _ = TockSyscalls::command(PWM, PWM_STOP, WHEEL_PIN, 0).to_result::<(), ErrorCode>();
+    if baseline.abs_diff(WHEEL_HZ) > TOLERANCE {
+        let _ = writeln!(
+            console,
+            "contend: wheel alone, throttle shut, {WHEEL_HZ} Hz -> {baseline} pps"
+        );
+        let _ = writeln!(
+            console,
+            "contend: NO WIRE -- check the GP20-GP21 jumper. Nothing was contending, \
+             so this is the bench and not the mux; not running the rest."
+        );
+        return;
+    }
+    let _ = writeln!(
+        console,
+        "contend: wire ok, {baseline} pps with the throttle shut"
+    );
+
     let mut failures = 0;
     for want in [0u32, 5000, 10000] {
         // The capsule slews at SCALE/20 per 20 ms tick, so full travel takes

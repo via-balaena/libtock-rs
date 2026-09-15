@@ -77,32 +77,56 @@ const WHITE: u16 = 0xFFFF;
 /// confused, and inside the range a real wheel will reach.
 const PREFLIGHT_HZ: u32 = 400;
 
-const PEDAL_CH: u32 = 0;
-/// The other stick axis. Read but never acted on -- it is here so the console
-/// can say what each channel actually does, which the Doom port's note
-/// ("ch1 vertical, ch0 horizontal") turned out not to settle: the throttle
-/// peaks at the 45 degree diagonal, and a plain horizontal axis would peak at
-/// full right.
-const OTHER_CH: u32 = 1;
+/// The VERTICAL stick axis: straight up accelerates, released coasts, pulled
+/// back regenerates. Inferred rather than measured -- the throttle used to
+/// peak at full right on ADC0, which is what a horizontal axis does, so
+/// vertical is the other one. The range report below confirms or refutes it
+/// on the first push.
+const PEDAL_CH: u32 = 1;
+/// The other axis. Read, never acted on, reported -- so a wrong guess above
+/// shows up as a channel that does not move.
+const OTHER_CH: u32 = 0;
 const BRAKE_BTN: u32 = 0;
+
 // THE PLAUSIBILITY BAND BELONGS TO THE SENSOR, NOT TO THE THROTTLE. A hall
 // throttle sits inside 0.8-4.2 V of a 5 V rail, so 0 V is a broken wire and
-// 5 V is a short, and neither is a pedal position. The bench joystick is a
-// potentiometer and reaches BOTH rails as part of its normal travel --
-// measured 416..65520 on ADC0 -- so the vehicle's band reads full deflection
-// as a fault. That is exactly what it looked like: the throttle opened around
-// the 45 degree diagonal and dropped out again past it, at the point where
-// ADC0 crossed 64,000.
+// 5 V is a short, and neither is a pedal position. A bare potentiometer --
+// which is what a joystick axis is -- reaches BOTH rails as part of its
+// normal travel, measured 416..65520, so the vehicle's band reads full
+// deflection as a short. That is exactly how it presented: the throttle
+// opened near the 45 degree diagonal and dropped out past it, where the axis
+// crossed 64,000.
 //
-// So these are the BENCH values, wide enough that a pot's travel is not a
-// fault. The vehicle build wants 1_500 and 64_000 back, against a sensor that
-// never reaches either rail.
+// These are bench values. Be exact about what that means: `raw` is a u16 and
+// BAND_HIGH is u16::MAX, so the upper branch can never be taken -- the
+// ceiling is OFF, not widened, and the vehicle failure it exists to catch (an
+// open circuit reading full scale) is precisely the one it cannot see. Say
+// "off" rather than "wide" so restoring it does not read as a tuning nicety.
+// Caught by the libtock-rs session, 2026-09-15.
+// TWO RESISTORS FIX IT PROPERLY: 2k from 3V3 to the stick module's VCC and 2k
+// from its GND pin to ground compresses BOTH axes into roughly 14%..86% of
+// the range, which puts the rails back out of reach and makes 4_000 / 62_000
+// the right band. Plus 100k from each wiper to ground, because an OPEN wiper
+// floats to somewhere near mid-scale and reads as a valid half throttle,
+// which is the failure that matters.
 const BAND_LOW: u16 = 100;
 const BAND_HIGH: u16 = 65_535;
-const PEDAL_REST: u16 = 33_000;
-/// Measured: ADC0 reaches 65,520 at full travel. 60,000 left the top tenth of
-/// the stick's throw doing nothing.
-const PEDAL_FULL: u16 = 65_000;
+
+/// Centre is sampled at boot, which doubles as the zero-at-boot interlock:
+/// the stick has to be released for the ECU to come up. A sample outside this
+/// window is a stuck stick or a broken sensor, and the throttle stays shut
+/// for the life of the process.
+const CENTRE_MIN: u16 = 25_000;
+const CENTRE_MAX: u16 = 40_000;
+/// Either side of centre, where the stick is treated as released. Wider than
+/// the 208 counts of jitter measured at rest, so a resting hand does not
+/// creep the throttle open.
+const DEADBAND: u16 = 2_500;
+/// Top of useful travel. Measured 65,520 at the rail; back off so the last
+/// stretch of throw is full throttle rather than a fault.
+const PEDAL_FULL: u16 = 62_000;
+/// Bottom of useful travel, for the regen half.
+const PEDAL_MIN: u16 = 2_000;
 
 fn rect(x: u32, y: u32, w: u32, h: u32, colour: u16) {
     if w == 0 || h == 0 {
@@ -171,48 +195,31 @@ fn main() {
 
     // Paint the whole panel once. Everything after this is small updates.
     //
-    // THE FIRST DRAW HAS TO WAIT, AND NOTHING TELLS YOU SO. Measured on a
-    // Pico 2 W with the kit's ST7796: every `set_write_frame` answers BUSY
-    // for the first **1,246 ms** after boot, then works, and the full-screen
-    // fill that follows takes 81 ms. Both BUSY sources in
-    // `capsules/extra/src/screen/screen.rs:149` are the app's own
-    // `pending_command`, not the panel -- and `Screen::exists()` and
-    // `get_resolution()` are answered by the capsule without touching the
-    // driver, so they succeed immediately and tell an app nothing. There is
-    // no "screen ready" signal in the syscall API.
+    // ONE CALL, NO RETRY. The panel answers BUSY to any frame call until its
+    // init sequence finishes -- 1,239 ms after boot, measured on the kit's
+    // ST7796 -- and nothing in the syscall API tells an app that:
+    // `Screen::exists()` and `get_resolution()` are answered by the capsule
+    // without touching the driver, so they succeed immediately. This app used
+    // to carry a retry loop, and picking its budget was the hard part: one
+    // that gave up at 1,017 ms still failed.
     //
-    // An app that clears once and drops the error -- which is what a helper
-    // like `rect` below quietly does -- leaves the PREVIOUS app's frozen
-    // image showing through everywhere it does not draw. That is exactly how
-    // this dash first came up: a working dash rendered over a still frame of
-    // Doom. Retry until it takes.
+    // The capsule queues the command now and serves it from
+    // `ScreenClient::screen_is_ready` instead, so the wait happens inside
+    // `yield_wait` and the app does not need to know the panel exists.
     let hz = Alarm::get_frequency().map(|f| f.0).unwrap_or(1);
     let t0 = Alarm::get_ticks().unwrap_or(0);
-    let mut attempts = 0u32;
-    let mut frame: Result<(), ErrorCode> = Err(ErrorCode::Busy);
-    while attempts < 200 {
-        attempts += 1;
-        frame = Screen::set_write_frame(0, 0, w, h);
-        if frame.is_ok() {
-            break;
-        }
-        let _ = Alarm::sleep_for(Milliseconds(25));
-    }
-    let t1 = Alarm::get_ticks().unwrap_or(0);
+    let frame = Screen::set_write_frame(0, 0, w, h);
     let mut buf = [0u8; 2];
-    let fill = if frame.is_ok() {
+    let filled = if frame.is_ok() {
         Screen::fill(&mut buf, BG)
     } else {
-        Err(ErrorCode::Busy)
+        frame
     };
-    let t2 = Alarm::get_ticks().unwrap_or(0);
-    let ms = |a: u32, b: u32| b.wrapping_sub(a) as u64 * 1000 / hz.max(1) as u64;
+    let t1 = Alarm::get_ticks().unwrap_or(0);
     let _ = writeln!(
         console,
-        "dash: clear frame={frame:?} after {attempts} tries / {} ms, \
-         fill={fill:?} in {} ms",
-        ms(t0, t1),
-        ms(t1, t2),
+        "dash: clear {w}x{h} frame={frame:?} fill={filled:?} in {} ms",
+        t1.wrapping_sub(t0) as u64 * 1000 / hz.max(1) as u64,
     );
 
     let _ = TockSyscalls::command(COUNTER, C_START, 0, 0).to_result::<(), ErrorCode>();
@@ -247,6 +254,26 @@ fn main() {
 
     let _ = TockSyscalls::command(THROTTLE, T_ARM, 0, 0).to_result::<(), ErrorCode>();
 
+    // Sample centre with the stick released. This IS the zero-at-boot
+    // interlock: a reading outside the window is a stuck stick or a broken
+    // sensor, and the throttle then stays shut for the life of the process.
+    let mut sum: u32 = 0;
+    for _ in 0..16 {
+        sum += Adc::read_single_sample_sync(PEDAL_CH).unwrap_or(0) as u32;
+        let _ = Alarm::sleep_for(Milliseconds(10));
+    }
+    let centre = (sum / 16) as u16;
+    let calibrated = (CENTRE_MIN..=CENTRE_MAX).contains(&centre);
+    let _ = writeln!(
+        console,
+        "dash: centre {centre} on ch{PEDAL_CH} -- {}",
+        if calibrated {
+            "armed"
+        } else {
+            "OUT OF RANGE, throttle stays shut"
+        }
+    );
+
     let mut ever_at_rest = false;
     let mut locked_out = false;
     let mut tick: u32 = 0;
@@ -271,7 +298,7 @@ fn main() {
     let mut wheel_errs: u32 = 0;
 
     loop {
-        let raw = Adc::read_single_sample_sync(PEDAL_CH).unwrap_or(PEDAL_REST);
+        let raw = Adc::read_single_sample_sync(PEDAL_CH).unwrap_or(centre);
         let other = Adc::read_single_sample_sync(OTHER_CH).unwrap_or(0);
         lo0 = lo0.min(raw);
         hi0 = hi0.max(raw);
@@ -279,7 +306,10 @@ fn main() {
         hi1 = hi1.max(other);
         let faulted = !(BAND_LOW..=BAND_HIGH).contains(&raw);
 
-        let at_rest = raw <= PEDAL_REST;
+        // Released means back inside the deadband, not "below centre" -- the
+        // lower half of a centring stick is regen, not extra idle. Coming
+        // back to centre is what clears a brake lockout.
+        let at_rest = raw.abs_diff(centre) <= DEADBAND;
         if at_rest {
             ever_at_rest = true;
             locked_out = false;
@@ -289,11 +319,24 @@ fn main() {
             locked_out = true;
         }
 
-        let target = if faulted || braking || locked_out || !ever_at_rest || at_rest {
+        let shut = faulted || braking || locked_out || !ever_at_rest || !calibrated;
+        let up = centre.saturating_add(DEADBAND);
+        let target = if shut || raw <= up {
             0
         } else {
-            let span = (PEDAL_FULL - PEDAL_REST) as u32;
-            (raw.min(PEDAL_FULL) - PEDAL_REST) as u32 * SCALE / span
+            let span = (PEDAL_FULL.saturating_sub(up)).max(1) as u32;
+            (raw.min(PEDAL_FULL) - up) as u32 * SCALE / span
+        };
+
+        // The other half of one-pedal driving. Reported only: braking is a
+        // controller command and there is no controller on this bench, so
+        // nothing here may quietly become an output.
+        let down = centre.saturating_sub(DEADBAND);
+        let regen = if shut || raw >= down {
+            0
+        } else {
+            let span = (down.saturating_sub(PEDAL_MIN)).max(1) as u32;
+            (down - raw.max(PEDAL_MIN)) as u32 * SCALE / span
         };
         if TockSyscalls::command(THROTTLE, T_SET, target, 0)
             .to_result::<(), ErrorCode>()
@@ -389,6 +432,7 @@ fn main() {
                  peak={pk_pedal}/{pk_target}/{pk_actual}/{pk_pps} hz={pk_hz} \
                  curve={}/{}/{}/{} \
                  ch0={lo0}..{hi0} ch1={lo1}..{hi1} \
+                 regen={regen} centre={centre} \
                  set_err={set_errs} wheel_err={wheel_errs} {}{}{}{}",
                 band_pps[0],
                 band_pps[1],
