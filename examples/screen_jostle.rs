@@ -38,7 +38,23 @@
 //! So a PASS here is only meaningful alongside the console transcript showing
 //! both apps issuing before either completes. Verified both ways on a Pico 2 W:
 //! against tock 5c0185624 B reports `Err(BUSY)` after 15 ms and says LOST;
-//! against 71e592db6 it reports `Ok(())` after 1238 ms and says SURVIVED.
+//! against 71e592db6 it reports `Ok(())` after 1238 ms and says SURVIVED, with
+//! B issuing at t=2757 us and A at t=52656 us.
+//!
+//! # That transcript rule is sufficient, and it was tested
+//!
+//! A 2,000 ms settle was run against the BROKEN kernel and reported SURVIVED --
+//! inert, exactly as the upper bound predicts. **What distinguishes it is
+//! visible in the transcript and nowhere else: B's verdict line prints BEFORE
+//! A's issue line, which cannot happen in a valid run.** So the check is a
+//! concrete predicate, not a disposition to be careful:
+//!
+//! ```text
+//! valid : B issues  ->  A issues  ->  B reports
+//! inert : B issues  ->  B reports ->  A issues     (SURVIVED means nothing)
+//! ```
+//!
+//! The timestamps on every line make that orderable by reading, not inferring.
 //!
 //! Build for `raspberry_pi_pico_2_w_slot2`, with the board's `kit_display`.
 
@@ -57,10 +73,25 @@ stack_size! {0x400}
 fn main() {
     let mut console = Console::writer();
 
-    // Let B issue and queue its command first. See the module docs: this wait
-    // is bounded at both ends, and the test is meaningless outside that window
-    // in one direction and vacuous in the other.
+    // Let B issue and queue its command first. Bounded at both ends -- see the
+    // module docs -- and the upper bound is the dangerous one, so it is a build
+    // error rather than a comment.
     const SETTLE_MS: u32 = 50;
+    /// Long enough for B to reach the capsule. Measured: B issues at ~2.8 ms.
+    const MIN_SETTLE_MS: u32 = 1;
+    /// The panel's init gap. Past this the driver is idle, there is nothing to
+    /// dequeue into, and the run is inert -- it reports SURVIVED on a kernel
+    /// known to be broken. Measured at 1,239 ms on the kit's ST7796.
+    const INIT_GAP_MS: u32 = 1_239;
+    const _: () = assert!(
+        SETTLE_MS >= MIN_SETTLE_MS,
+        "settle is too short: B will not have queued"
+    );
+    const _: () = assert!(
+        SETTLE_MS < INIT_GAP_MS,
+        "settle is too long: the driver will be idle and the run inert"
+    );
+
     let _ = Alarm::sleep_for(Milliseconds(SETTLE_MS));
 
     // No set_write_frame anywhere above this line -- that is the whole point.
