@@ -78,6 +78,12 @@ const WHITE: u16 = 0xFFFF;
 const PREFLIGHT_HZ: u32 = 400;
 
 const PEDAL_CH: u32 = 0;
+/// The other stick axis. Read but never acted on -- it is here so the console
+/// can say what each channel actually does, which the Doom port's note
+/// ("ch1 vertical, ch0 horizontal") turned out not to settle: the throttle
+/// peaks at the 45 degree diagonal, and a plain horizontal axis would peak at
+/// full right.
+const OTHER_CH: u32 = 1;
 const BRAKE_BTN: u32 = 0;
 const BAND_LOW: u16 = 1_500;
 const BAND_HIGH: u16 = 64_000;
@@ -243,12 +249,20 @@ fn main() {
     // moving, in both directions; a band is only trustworthy for a position
     // that was HELD.
     let mut pk_hz = 0u32;
+    // Range of both stick axes, so the console can report what the hardware
+    // does rather than what a previous note said it did.
+    let (mut lo0, mut hi0, mut lo1, mut hi1) = (u16::MAX, 0u16, u16::MAX, 0u16);
     let mut band_pps = [0u32; 4];
     let mut set_errs: u32 = 0;
     let mut wheel_errs: u32 = 0;
 
     loop {
         let raw = Adc::read_single_sample_sync(PEDAL_CH).unwrap_or(PEDAL_REST);
+        let other = Adc::read_single_sample_sync(OTHER_CH).unwrap_or(0);
+        lo0 = lo0.min(raw);
+        hi0 = hi0.max(raw);
+        lo1 = lo1.min(other);
+        hi1 = hi1.max(other);
         let faulted = !(BAND_LOW..=BAND_HIGH).contains(&raw);
 
         let at_rest = raw <= PEDAL_REST;
@@ -360,6 +374,7 @@ fn main() {
                 "dash: pedal={raw} target={target} actual={actual} pps={pps} \
                  peak={pk_pedal}/{pk_target}/{pk_actual}/{pk_pps} hz={pk_hz} \
                  curve={}/{}/{}/{} \
+                 ch0={lo0}..{hi0} ch1={lo1}..{hi1} \
                  set_err={set_errs} wheel_err={wheel_errs} {}{}{}{}",
                 band_pps[0],
                 band_pps[1],
