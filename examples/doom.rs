@@ -50,7 +50,7 @@ set_main! {main}
 /// Doom recurses through the BSP, so this is not a formality. Not yet measured
 /// -- 32 KiB is a guess with room in it, and the first thing to shrink if the
 /// zone needs more.
-stack_size! {0x2000}
+stack_size! {0x1000}
 
 const DOOM_W: usize = 320;
 const DOOM_H: usize = 200;
@@ -66,10 +66,10 @@ const STAGE_BYTES: usize = DOOM_W * BAND * 2;
 
 /// What the shim's allocator hands out. Doom's zone takes nearly all of it in
 /// one call, so this and `ZONE_KIB` move together.
-const HEAP_BYTES: usize = 256 * 1024;
+const HEAP_BYTES: usize = 268 * 1024;
 /// Passed to Doom as `-kb`. Leaves the heap a few KiB for the handful of
 /// strings Doom duplicates outside the zone.
-const ZONE_KIB: usize = 222;
+const ZONE_KIB: usize = 236;
 
 /// The panel spends over a second in its init sequence and answers BUSY until
 /// it is done. Measured at 1225 ms from userspace.
@@ -236,10 +236,26 @@ fn report_budget<W: Write>(console: &mut W) {
 #[no_mangle]
 pub extern "C" fn tock_exit(status: i32) -> ! {
     let mut console = Console::writer();
-    let _ = writeln!(console, "\ndoom: exit({status})");
-    report_budget(&mut console);
+    // SAFETY: a NUL-terminated C string in the Doom image, written only by
+    // I_Error before it calls exit.
+    let why = unsafe {
+        let p = addr_of_mut!(dg_last_error) as *const u8;
+        let mut n = 0usize;
+        while n < 512 && *p.add(n) != 0 {
+            n += 1;
+        }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("(not utf-8)")
+    };
+    // Say it repeatedly, not once. Printed once on a serial console nobody is
+    // watching, an error is indistinguishable from a freeze -- and that cost an
+    // hour of hunting a hang that had already explained itself.
     loop {
-        let _ = Alarm::sleep_for(Milliseconds(1000));
+        let _ = writeln!(console, "\ndoom: STOPPED -- exit({status})");
+        if !why.is_empty() {
+            let _ = writeln!(console, "doom: I_Error: {why}");
+        }
+        report_budget(&mut console);
+        let _ = Alarm::sleep_for(Milliseconds(5000));
     }
 }
 
@@ -257,6 +273,9 @@ extern "C" {
     static colors: [u32; 256];
     /// `boolean`, which is `unsigned int` in doomtype.h.
     static mut palette_changed: u32;
+
+    /// The last message I_Error was given; empty if it was never called.
+    static mut dg_last_error: [u8; 512];
 }
 
 static mut PALETTE: [u16; 256] = [0; 256];
@@ -543,7 +562,7 @@ static mut ARG0: [u8; 5] = *b"doom\0";
 static mut ARG_IWAD: [u8; 6] = *b"-iwad\0";
 static mut ARG_WAD: [u8; 9] = *b"doom.wad\0";
 static mut ARG_KB: [u8; 4] = *b"-kb\0";
-static mut ARG_KB_N: [u8; 8] = *b"222\0\0\0\0\0";
+static mut ARG_KB_N: [u8; 8] = *b"236\0\0\0\0\0";
 /* Straight into the map. Without this Doom starts at the title screen and
  * wants TITLEPIC, the demo lumps and the rest of the attract loop -- none of
  * which a WAD trimmed to one map carries, and none of which this build is
