@@ -193,19 +193,30 @@
 //!   answers success; NOSUPPORT, INVAL, NOMEM and OFF still fail immediately.
 //!   The app waits inside `yield_wait` and never learns the panel exists.
 //!
-//! So the retry below is kept, with its meaning inverted: **against a kernel at
-//! `5c0185624` or later it must report zero.** A non-zero wait means the
-//! flashed kernel predates the fix -- which on this bench is a likelier
-//! explanation for a strange result than anything this app does.
-//! `examples/screen_ready.rs` is the dedicated instrument, and it measured BUSY
-//! at 0 ms before the change against `Ok(())` at 1,239 ms after.
+//! **So this app no longer retries. It calls once and stops loudly.** BUSY now
+//! has exactly two meanings, both of them findings, and neither improves by
+//! being waited out:
 //!
-//! It stays in this app rather than in `apis/display/screen` deliberately.
-//! Putting a retry loop in the wrapper would change what every screen call in
-//! the crate does about time, and after `5c0185624` it would also mask the one
-//! meaning of BUSY that is left -- an app issuing a second command without
-//! waiting for the first -- by turning a real app bug into a silent
-//! multi-second stall.
+//! - on the **first** call, the flashed kernel predates `5c0185624`;
+//! - on a **later** one, a command was issued before the previous completed --
+//!   which this app does not do, so it would be new.
+//!
+//! A retry masks the second for as long as its budget lasts and then reports a
+//! number, which is strictly worse than stopping. Reporting the wait afterwards
+//! mitigates the masking without removing it, and a detector that must read
+//! zero only ever runs when it is hiding a real bug. Going the other way also
+//! drops the budget constant, which this project's own history says is the hard
+//! part: a retry elsewhere gave up at 1,017 ms against a gap of 1,239.
+//!
+//! `examples/screen_ready.rs` is the dedicated instrument and takes the same
+//! approach -- it separates the two kernel states by *which answer arrives*
+//! rather than by counting. It measured `Err(BUSY)` at 0 ms before the change
+//! against `Ok(())` at 1,239 ms after.
+//!
+//! The retry never belonged in `apis/display/screen` either. Putting one in the
+//! wrapper would change what every screen call in the crate does about time,
+//! and it would turn that second meaning -- a real app bug -- into a silent
+//! multi-second stall in every app at once.
 //!
 //! # What `Ok` means here, which is less than it looks
 //!
@@ -283,22 +294,6 @@ const BARS: [(u16, &str); 8] = [
 /// two bytes each, on a 480-wide panel. If the reported geometry needs more
 /// than this, the control is skipped rather than silently truncated.
 const CONTROL_MAX: usize = 240 * 40 * 2;
-
-/// How long to sleep between retries of a call the panel refused with BUSY,
-/// and how long to keep doing that before giving up.
-///
-/// Against a kernel at `5c0185624` or later this never fires: the capsule
-/// queues a BUSY command and serves it at `screen_is_ready`, so the wait
-/// happens inside `yield_wait` and the app sees `Ok` straight away. The loop
-/// is left in as a version check on the flashed kernel -- see the readiness
-/// section of the module docs.
-///
-/// The budget is sized against a measured gap of 1,239 ms, not against the
-/// `delay:` constants, which sum to 625 and lie: `delay: 255` is a sentinel
-/// that `do_next_op` maps to 500. An earlier retry elsewhere gave up at
-/// 1,017 ms and still failed.
-const READY_POLL_MS: u32 = 25;
-const READY_BUDGET_MS: u32 = 5_000;
 
 fn main() {
     let mut console = Console::writer();
@@ -402,47 +397,53 @@ fn main() {
     );
 
     let mut failures = 0u32;
-    let mut waited_total = 0u32;
-    let mut waited_first = 0u32;
 
     for (index, (colour, name)) in BARS.iter().enumerate() {
         let x = bar_w * index as u32;
-        let (result, waited) = fill_rect(x, 0, bar_w, bars_h, *colour);
-        if index == 0 {
-            waited_first = waited;
+        match fill_rect(x, 0, bar_w, bars_h, *colour) {
+            Ok(()) => {}
+            // BUSY has two meanings left and neither is worth drawing over, so
+            // this stops instead of absorbing it. Which meaning it is depends
+            // only on whether this was the first call.
+            Err(ErrorCode::Busy) => {
+                let _ = writeln!(
+                    console,
+                    "kit_screen_bars: BUSY on fill {name}, bar {index} of \
+                     {}. This app does not retry.\r\n\
+                     \x20 On a kernel at 5c0185624 or later the capsule queues \
+                     a refused command and\r\n\
+                     \x20 serves it at screen_is_ready, so the wait happens \
+                     inside yield_wait and an\r\n\
+                     \x20 app never sees BUSY at all. Reaching here means one \
+                     of two things:\r\n\
+                     \x20   bar 0  -- the flashed kernel predates that fix. \
+                     Check what is on the\r\n\
+                     \x20            board before reading anything else in \
+                     this run.\r\n\
+                     \x20   bar 1+ -- a command was issued before the previous \
+                     one completed. This\r\n\
+                     \x20            app does not do that, so it would be a \
+                     new finding.\r\n\
+                     \x20 Stopping. The glass still holds whatever the last \
+                     process left on it.\r",
+                    BARS.len()
+                );
+                return;
+            }
+            Err(e) => {
+                let _ = writeln!(console, "kit_screen_bars: fill {name}: {e:?}\r");
+                failures += 1;
+            }
         }
-        waited_total += waited;
-        if let Err(e) = result {
-            let _ = writeln!(console, "kit_screen_bars: fill {name}: {e:?}\r");
-            failures += 1;
-        }
-    }
-
-    if waited_first > 0 {
-        let _ = writeln!(
-            console,
-            "kit_screen_bars: the first call waited {waited_first} ms for the \
-             panel to leave\r\n\
-             \x20 its init sequence. A kernel at 5c0185624 or later queues that \
-             command\r\n\
-             \x20 instead of refusing it, so this should be 0 -- a non-zero \
-             number here\r\n\
-             \x20 means the flashed kernel predates the fix, not that the panel \
-             is slow.\r"
-        );
     }
 
     // Black ground, so an undrawn row of the strip is unambiguously undrawn.
-    let (grounded, waited) = fill_rect(0, strip_y, width, strip_h, BLACK);
-    waited_total += waited;
-    if let Err(e) = grounded {
+    if let Err(e) = fill_rect(0, strip_y, width, strip_h, BLACK) {
         let _ = writeln!(console, "kit_screen_bars: fill strip ground: {e:?}\r");
         failures += 1;
     }
 
-    let (left, waited) = write_rect_by_rows(0, strip_y, left_w, strip_h, BLUE_BYTES);
-    waited_total += waited;
-    match left {
+    match write_rect_by_rows(0, strip_y, left_w, strip_h, BLUE_BYTES) {
         Ok(calls) => {
             let _ = writeln!(
                 console,
@@ -471,10 +472,7 @@ fn main() {
         for pair in buffer[..control_bytes].chunks_exact_mut(2) {
             pair.copy_from_slice(&WHITE_BYTES);
         }
-        let (right, waited) =
-            write_rect_once(left_w, strip_y, right_w, strip_h, &buffer[..control_bytes]);
-        waited_total += waited;
-        match right {
+        match write_rect_once(left_w, strip_y, right_w, strip_h, &buffer[..control_bytes]) {
             Ok(()) => {
                 let _ = writeln!(
                     console,
@@ -491,15 +489,13 @@ fn main() {
 
     let _ = writeln!(
         console,
-        "kit_screen_bars: {waited_total} ms total spent retrying calls the \
-         panel refused\r\n\
-         \x20 with BUSY. Expected 0 on a kernel at 5c0185624 or later, which \
-         queues a\r\n\
-         \x20 BUSY command instead of discarding it. Anything beyond the first \
-         call's\r\n\
-         \x20 wait means BUSY arrived after the panel was up, which would be a \
-         different\r\n\
-         \x20 finding again.\r"
+        "kit_screen_bars: every call was answered without BUSY, so the flashed \
+         kernel\r\n\
+         \x20 queues a refused command rather than discarding it -- 5c0185624 \
+         or later.\r\n\
+         \x20 That is the only claim this run makes about the kernel, and it is \
+         a claim\r\n\
+         \x20 about the calls, not about the glass.\r"
     );
 
     if failures == 0 {
@@ -527,80 +523,44 @@ fn main() {
     }
 }
 
-/// Runs one drawing call, absorbing the BUSY the panel returns for as long as
-/// its init sequence lasts. Returns the outcome and how long it waited, so the
-/// size of that window is reported rather than merely tolerated.
-///
-/// Only BUSY is retried. Every other error is the answer.
-fn retry_busy(mut call: impl FnMut() -> Result<(), ErrorCode>) -> (Result<(), ErrorCode>, u32) {
-    let mut waited = 0;
-    loop {
-        match call() {
-            Err(ErrorCode::Busy) if waited < READY_BUDGET_MS => {
-                let _ = Alarm::sleep_for(Milliseconds(READY_POLL_MS));
-                waited += READY_POLL_MS;
-            }
-            result => return (result, waited),
-        }
-    }
-}
-
 /// One solid rectangle, colour chosen as a `u16` so the wrapper picks the byte
-/// order. The frame and the fill retry together: a frame the panel refused has
-/// to be set again before the fill it belongs to.
-fn fill_rect(x: u32, y: u32, w: u32, h: u32, colour: u16) -> (Result<(), ErrorCode>, u32) {
-    retry_busy(|| {
-        Screen::set_write_frame(x, y, w, h)?;
-        let mut pixel = [0u8; 2];
-        Screen::fill(&mut pixel, colour)
-    })
+/// order.
+fn fill_rect(x: u32, y: u32, w: u32, h: u32, colour: u16) -> Result<(), ErrorCode> {
+    Screen::set_write_frame(x, y, w, h)?;
+    let mut pixel = [0u8; 2];
+    Screen::fill(&mut pixel, colour)
 }
 
 /// One rectangle built from the caller's own bytes, a row per `write` call.
 /// Returns the call count, so a capsule that restarts at the frame origin can
 /// be told from one that continues -- by comparing the count against how many
 /// rows actually painted.
-fn write_rect_by_rows(
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
-    pixel: [u8; 2],
-) -> (Result<u32, ErrorCode>, u32) {
+fn write_rect_by_rows(x: u32, y: u32, w: u32, h: u32, pixel: [u8; 2]) -> Result<u32, ErrorCode> {
     // One row. 480 is the widest panel this app expects, and a half-width row
     // of it is 240 pixels.
     let mut row = [0u8; 240 * 2];
     let row_bytes = (w as usize) * 2;
     if row_bytes > row.len() {
-        return (Err(ErrorCode::Size), 0);
+        return Err(ErrorCode::Size);
     }
     for pair in row[..row_bytes].chunks_exact_mut(2) {
         pair.copy_from_slice(&pixel);
     }
 
-    let (framed, mut waited) = retry_busy(|| Screen::set_write_frame(x, y, w, h));
-    if let Err(e) = framed {
-        return (Err(e), waited);
-    }
+    Screen::set_write_frame(x, y, w, h)?;
 
     let mut calls = 0u32;
     for _ in 0..h {
-        let (written, spent) = retry_busy(|| Screen::write(&row[..row_bytes]));
-        waited += spent;
-        if let Err(e) = written {
-            return (Err(e), waited);
-        }
+        Screen::write(&row[..row_bytes])?;
         calls += 1;
     }
-    (Ok(calls), waited)
+    Ok(calls)
 }
 
 /// One rectangle in a single `write` call -- the path a frame blit uses, where
 /// the capsule chunks the caller's buffer through its own and continues within
 /// the one syscall.
-fn write_rect_once(x: u32, y: u32, w: u32, h: u32, pixels: &[u8]) -> (Result<(), ErrorCode>, u32) {
-    retry_busy(|| {
-        Screen::set_write_frame(x, y, w, h)?;
-        Screen::write(pixels)
-    })
+fn write_rect_once(x: u32, y: u32, w: u32, h: u32, pixels: &[u8]) -> Result<(), ErrorCode> {
+    Screen::set_write_frame(x, y, w, h)?;
+    Screen::write(pixels)
 }
