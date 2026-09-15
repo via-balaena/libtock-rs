@@ -172,28 +172,40 @@
 //! a `// 255?` comment, meaning a change to 255 there would silently become 500
 //! as well. Read the mapping, never the constant.
 //!
-//! **A kernel client waits for `screen_is_ready()`. An app cannot.** The
-//! capsule implements readiness and uses it to run queued commands, but nothing
-//! surfaces "the screen has finished initialising" through the syscall
-//! interface. That is a real gap and it is the kernel side's; retrying on BUSY
-//! is the workaround, not the fix.
+//! # The readiness gap is closed kernel-side, and this retry is now a detector
 //!
-//! It lives in this app rather than in `apis/display/screen` deliberately.
+//! **A kernel client waits for `screen_is_ready()`. An app could not.** The
+//! capsule always had the mechanism -- the driver raises `screen_is_ready` when
+//! its init sequence finishes, and the capsule's handler runs the first app
+//! with `pending_command` set -- but `enqueue_command`'s error path threw the
+//! command away before it could ever be served. Three kernel states, in order:
+//!
+//! - Before `c45dd2150`: `pending_command` left set and BUSY returned. The
+//!   command really was still queued, but this crate takes `?` on the command
+//!   return and drops the `share::scope` subscription before it ever yields, so
+//!   the upcall landed on nothing and every later call answered BUSY from the
+//!   queue for the life of the process. A retry against that kernel would have
+//!   spun forever and looked like a dead panel.
+//! - After `c45dd2150`: state consistent, wedge gone, command discarded. Every
+//!   BUSY was then the panel saying `status != Idle`, honestly, and a retry was
+//!   the only thing that worked.
+//! - After `5c0185624`: BUSY *specifically* leaves the command queued and
+//!   answers success; NOSUPPORT, INVAL, NOMEM and OFF still fail immediately.
+//!   The app waits inside `yield_wait` and never learns the panel exists.
+//!
+//! So the retry below is kept, with its meaning inverted: **against a kernel at
+//! `5c0185624` or later it must report zero.** A non-zero wait means the
+//! flashed kernel predates the fix -- which on this bench is a likelier
+//! explanation for a strange result than anything this app does.
+//! `examples/screen_ready.rs` is the dedicated instrument, and it measured BUSY
+//! at 0 ms before the change against `Ok(())` at 1,239 ms after.
+//!
+//! It stays in this app rather than in `apis/display/screen` deliberately.
 //! Putting a retry loop in the wrapper would change what every screen call in
-//! the crate does about time, which is a PR with a description attached. Here
-//! it changes one example.
-//!
-//! **How long the wait actually is has never been measured from userspace**, so
-//! the app reports it: the total time spent absorbing BUSY is printed at the
-//! end. That number is the size of the gap, stated in the units an app
-//! experiences it in.
-//!
-//! The first run also found a kernel defect that would have made this retry
-//! useless -- `enqueue_command` left `pending_command` set when the screen
-//! refused a command, so the first BUSY wedged the app's access for the life of
-//! the process and every later call answered BUSY from the queue rather than
-//! from the driver. Fixed kernel-side in `c45dd2150`. A retry against the
-//! unfixed kernel would have spun forever and looked like a dead panel.
+//! the crate does about time, and after `5c0185624` it would also mask the one
+//! meaning of BUSY that is left -- an app issuing a second command without
+//! waiting for the first -- by turning a real app bug into a silent
+//! multi-second stall.
 //!
 //! # What `Ok` means here, which is less than it looks
 //!
@@ -206,6 +218,13 @@
 //! `run_next_command(into_statuscode(r), 0, 0)` at
 //! `tock/capsules/extra/src/screen.rs:426, :439, :450` -- and this crate
 //! discards it.
+//!
+//! Those line numbers are against the pinned submodule `b3234a172` only. In
+//! `~/forge/tock` the file has since moved to `capsules/extra/src/screen/screen.rs`
+//! and the numbers have shifted. Grep `run_next_command`; do not trust the
+//! line. Reading `:149` as an app-level guard while describing a tree where it
+//! had already been fixed to clear `pending_command` is exactly how the
+//! attribution above went wrong once already.
 //!
 //! So a synchronous rejection is caught, by `to_result()?` on the command, and
 //! an asynchronous failure is reported as success. For this app that means
@@ -266,9 +285,18 @@ const BARS: [(u16, &str); 8] = [
 const CONTROL_MAX: usize = 240 * 40 * 2;
 
 /// How long to sleep between retries of a call the panel refused with BUSY,
-/// and how long to keep doing that before giving up. The init sequence this is
-/// absorbing is upwards of 600 ms; the budget is generous because the cost of
-/// being wrong is a run that reports a dead panel.
+/// and how long to keep doing that before giving up.
+///
+/// Against a kernel at `5c0185624` or later this never fires: the capsule
+/// queues a BUSY command and serves it at `screen_is_ready`, so the wait
+/// happens inside `yield_wait` and the app sees `Ok` straight away. The loop
+/// is left in as a version check on the flashed kernel -- see the readiness
+/// section of the module docs.
+///
+/// The budget is sized against a measured gap of 1,239 ms, not against the
+/// `delay:` constants, which sum to 625 and lie: `delay: 255` is a sentinel
+/// that `do_next_op` maps to 500. An earlier retry elsewhere gave up at
+/// 1,017 ms and still failed.
 const READY_POLL_MS: u32 = 25;
 const READY_BUDGET_MS: u32 = 5_000;
 
@@ -395,9 +423,12 @@ fn main() {
             console,
             "kit_screen_bars: the first call waited {waited_first} ms for the \
              panel to leave\r\n\
-             \x20 its init sequence -- that is the size of the readiness gap, \
-             measured from\r\n\
-             \x20 userspace, where no syscall reports it.\r"
+             \x20 its init sequence. A kernel at 5c0185624 or later queues that \
+             command\r\n\
+             \x20 instead of refusing it, so this should be 0 -- a non-zero \
+             number here\r\n\
+             \x20 means the flashed kernel predates the fix, not that the panel \
+             is slow.\r"
         );
     }
 
@@ -462,9 +493,13 @@ fn main() {
         console,
         "kit_screen_bars: {waited_total} ms total spent retrying calls the \
          panel refused\r\n\
-         \x20 with BUSY. Anything beyond the first call's wait means BUSY \
-         arrived after\r\n\
-         \x20 the panel was up, which would be a different finding.\r"
+         \x20 with BUSY. Expected 0 on a kernel at 5c0185624 or later, which \
+         queues a\r\n\
+         \x20 BUSY command instead of discarding it. Anything beyond the first \
+         call's\r\n\
+         \x20 wait means BUSY arrived after the panel was up, which would be a \
+         different\r\n\
+         \x20 finding again.\r"
     );
 
     if failures == 0 {
