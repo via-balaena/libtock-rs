@@ -14,6 +14,12 @@ pub struct TockMonochrome8BitPage128x64Screen {
     framebuffer: [u8; (128 * 64) / 8],
     width: u32,
     height: u32,
+    /// Whether the kernel accepted what `new` asked it for.
+    ///
+    /// `new` cannot return a `Result` without removing `Default`, and a screen
+    /// whose pixel format was refused cannot draw anything correct, so the
+    /// error is kept here and answered by `flush` and `setup_result`.
+    setup: Result<(), ErrorCode>,
 }
 
 impl Default for TockMonochrome8BitPage128x64Screen {
@@ -24,18 +30,39 @@ impl Default for TockMonochrome8BitPage128x64Screen {
 
 impl TockMonochrome8BitPage128x64Screen {
     pub fn new() -> Self {
-        let (width, height) = Screen::get_resolution().unwrap_or((0, 0));
-
         // Because this is a specific type of screen with a specific pixel
         // format, we tell the kernel that is the pixel format we expect.
-        let mono_8_bit_page = 6;
-        let _ = Screen::set_pixel_format(mono_8_bit_page);
+        //
+        // Both of these can fail, and neither failure is safe to discard. A
+        // driver that refuses the format keeps the one it already has, and
+        // every byte written afterwards is then interpreted in that other
+        // format; a resolution this could not read leaves a 0x0 write frame
+        // that 1024 bytes are pushed into. Verified on the Raspberry Pi Pico
+        // 2's ST7796, where `st77xx::set_pixel_format` answers INVAL for
+        // everything except RGB_565 -- so asking for Mono_8BitPage there and
+        // ignoring the answer draws a monochrome framebuffer into an RGB565
+        // panel.
+        const MONO_8_BIT_PAGE: usize = 6;
+        let (setup, width, height) = match Screen::get_resolution() {
+            Ok((width, height)) => (Screen::set_pixel_format(MONO_8_BIT_PAGE), width, height),
+            Err(e) => (Err(e), 0, 0),
+        };
 
         Self {
             framebuffer: [0; 1024],
             width,
             height,
+            setup,
         }
+    }
+
+    /// Whether the kernel accepted this screen's resolution query and pixel
+    /// format.
+    ///
+    /// `flush` answers the same error, so this is only needed to fail before
+    /// drawing rather than at the first draw.
+    pub fn setup_result(&self) -> Result<(), ErrorCode> {
+        self.setup
     }
 
     pub fn get_width(&self) -> u32 {
@@ -47,7 +74,12 @@ impl TockMonochrome8BitPage128x64Screen {
     }
 
     /// Updates the screen from the framebuffer.
+    ///
+    /// Answers the constructor's error first: drawing into a screen that
+    /// refused this adapter's pixel format produces a pattern rather than a
+    /// failure, which is worse than not drawing.
     pub fn flush(&self) -> Result<(), ErrorCode> {
+        self.setup?;
         Screen::set_write_frame(0, 0, self.width, self.height)?;
         Screen::write(&self.framebuffer)?;
         Ok(())
