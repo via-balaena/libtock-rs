@@ -180,11 +180,7 @@ fn get_rotation_success() {
         skip_with_error: None,
     });
     assert_eq!(Screen::set_rotation(30), Ok(()));
-    kernel.add_expected_syscall(ExpectedSyscall::Subscribe {
-        driver_num: 0x90001,
-        subscribe_num: 0,
-        skip_with_error: None,
-    });
+    // Synchronous: no Subscribe, so none is expected.
     assert_eq!(Screen::get_rotation(), Ok(30));
 }
 
@@ -194,11 +190,7 @@ fn get_rotation_fail() {
     let kernel = fake::Kernel::new();
     let driver = fake::Screen::new();
     kernel.add_driver(&driver);
-    kernel.add_expected_syscall(ExpectedSyscall::Subscribe {
-        driver_num: 0x90001,
-        subscribe_num: 0,
-        skip_with_error: None,
-    });
+    // Synchronous: no Subscribe, so none is expected.
     assert_eq!(Screen::get_rotation(), Ok(0));
 }
 
