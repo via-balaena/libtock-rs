@@ -17,6 +17,8 @@ rust-version = "1.87"
 
 [features]
 # Compiles doomgeneric's C from the tree named by DOOM_SRC and links it in.
+# That C is GPL-2.0-only, so a binary built with this feature on may only be
+# distributed under GPL-2.0-only. See LICENSE-DOOM.
 # Kept behind a feature because it needs that tree and a clang that can target
 # the board, which no other example does.
 doom = []

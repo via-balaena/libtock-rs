@@ -1,5 +1,12 @@
 //! Doom, on the kit's ST7796.
 //!
+//! **Licensing.** This file is Apache-2.0 OR MIT like the rest of the tree, and
+//! is original work -- writing to doomgeneric's hook API does not make it a
+//! derivative of Doom. Building it with `--features doom` links GPL-2.0-only
+//! code, and the resulting binary may only be distributed under GPL-2.0-only.
+//! `LICENSE-DOOM` at the repository root says why, and no other example in this
+//! tree links GPL code.
+//!
 //! The C is `doomgeneric` compiled for this target with clang and the libc
 //! shim in that tree's `tock/`; this file is the other side of two contracts.
 //!
