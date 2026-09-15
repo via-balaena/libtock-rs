@@ -29,6 +29,25 @@ const PLATFORMS: &[(&str, &str, &str, &str, &str)] = &[
     // 1's on purpose -- the two rows are two placements in one flash region,
     // not two regions.
     ("raspberry_pi_pico_2_slot2", "0x10041000", "252K"     , "0x20030000", "256K"   ),
+    // BENCH: a CO-RESIDENT PAIR for the Pico 2 W, for tests that need two apps
+    // holding screen commands at once.
+    //
+    // Deliberately NOT derived from the `raspberry_pi_pico_2_w` row above. That
+    // row's 480K of RAM is Doom's heap budget on a 520K part -- the RAM length
+    // is the grant the kernel reserves, so an app linked there leaves no room
+    // for a second, and shrinking it trades against the thing the board is for.
+    // These are a third placement instead, and the Doom row is untouched: the
+    // rows are placements in one region, not regions.
+    //
+    // 64K flash apiece and naturally aligned, which a real screen app fits with
+    // room to spare -- `kit_screen_bars.tbf` measures 10,176 bytes. 128K of RAM
+    // apiece, contiguous, 256K total on a 520K part.
+    //
+    // REASONED FROM THE ROW ABOVE, NOT FLASHED. The addresses have not been
+    // loaded on hardware; the failure mode if one is wrong is an app that will
+    // not load, which shows up immediately.
+    ("raspberry_pi_pico_2_w_slot1", "0x10090000", "64K"   , "0x2000A000", "128K"   ),
+    ("raspberry_pi_pico_2_w_slot2", "0x100A0000", "64K"   , "0x2002A000", "128K"   ),
     ("stm32f3discovery"   , "0x08020000", "0x0020000", "0x20004000", "48K"    ),
     ("stm32f412gdiscovery", "0x08030000", "256K"     , "0x20004000", "112K"   ),
     ("nano33ble"          , "0x00050000", "704K"     , "0x20005000", "240K"   ),

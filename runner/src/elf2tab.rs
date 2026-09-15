@@ -26,7 +26,9 @@ fn get_platform_architecture(platform: &str) -> Option<&'static str> {
         "psc3m5_evk"
         | "raspberry_pi_pico_2"
         | "raspberry_pi_pico_2_w"
-        | "raspberry_pi_pico_2_slot2" => Some("cortex-m33"),
+        | "raspberry_pi_pico_2_slot2"
+        | "raspberry_pi_pico_2_w_slot1"
+        | "raspberry_pi_pico_2_w_slot2" => Some("cortex-m33"),
         _ => None,
     }
 }
