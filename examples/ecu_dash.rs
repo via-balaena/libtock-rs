@@ -85,10 +85,24 @@ const PEDAL_CH: u32 = 0;
 /// full right.
 const OTHER_CH: u32 = 1;
 const BRAKE_BTN: u32 = 0;
-const BAND_LOW: u16 = 1_500;
-const BAND_HIGH: u16 = 64_000;
+// THE PLAUSIBILITY BAND BELONGS TO THE SENSOR, NOT TO THE THROTTLE. A hall
+// throttle sits inside 0.8-4.2 V of a 5 V rail, so 0 V is a broken wire and
+// 5 V is a short, and neither is a pedal position. The bench joystick is a
+// potentiometer and reaches BOTH rails as part of its normal travel --
+// measured 416..65520 on ADC0 -- so the vehicle's band reads full deflection
+// as a fault. That is exactly what it looked like: the throttle opened around
+// the 45 degree diagonal and dropped out again past it, at the point where
+// ADC0 crossed 64,000.
+//
+// So these are the BENCH values, wide enough that a pot's travel is not a
+// fault. The vehicle build wants 1_500 and 64_000 back, against a sensor that
+// never reaches either rail.
+const BAND_LOW: u16 = 100;
+const BAND_HIGH: u16 = 65_535;
 const PEDAL_REST: u16 = 33_000;
-const PEDAL_FULL: u16 = 60_000;
+/// Measured: ADC0 reaches 65,520 at full travel. 60,000 left the top tenth of
+/// the stick's throw doing nothing.
+const PEDAL_FULL: u16 = 65_000;
 
 fn rect(x: u32, y: u32, w: u32, h: u32, colour: u16) {
     if w == 0 || h == 0 {
