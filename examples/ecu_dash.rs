@@ -236,6 +236,14 @@ fn main() {
     // not -- a once-a-second sample of a live value never catches the two
     // together.
     let (mut pk_pedal, mut pk_target, mut pk_actual, mut pk_pps) = (0u16, 0u32, 0u32, 0u32);
+    // Highest wheel frequency ever commanded, and the highest pps seen in
+    // each quarter of the throttle range -- one stick sweep then leaves the
+    // whole throttle-to-wheel transfer behind for whoever reads the console
+    // next. The counter's 250 ms window smears this while the throttle is
+    // moving, in both directions; a band is only trustworthy for a position
+    // that was HELD.
+    let mut pk_hz = 0u32;
+    let mut band_pps = [0u32; 4];
     let mut set_errs: u32 = 0;
     let mut wheel_errs: u32 = 0;
 
@@ -279,6 +287,7 @@ fn main() {
         let want_wheel = actual > 0;
         let wheel = if want_wheel {
             let hz = 40 + actual * 960 / SCALE;
+            pk_hz = pk_hz.max(hz);
             let packed = WHEEL_PIN | (5000 << 16);
             TockSyscalls::command(PWM, PWM_START, packed, hz).to_result::<(), ErrorCode>()
         } else if wheel_on {
@@ -336,6 +345,10 @@ fn main() {
         // session driven over SSH cannot see the glass, and a dash that only
         // draws is indistinguishable from a dash that has stopped drawing.
         pk_pedal = pk_pedal.max(raw);
+        let band = ((actual * 4 / (SCALE + 1)) as usize).min(3);
+        if actual > 0 {
+            band_pps[band] = band_pps[band].max(pps);
+        }
         pk_target = pk_target.max(target);
         pk_actual = pk_actual.max(actual);
         pk_pps = pk_pps.max(pps);
@@ -345,8 +358,13 @@ fn main() {
             let _ = writeln!(
                 console,
                 "dash: pedal={raw} target={target} actual={actual} pps={pps} \
-                 peak={pk_pedal}/{pk_target}/{pk_actual}/{pk_pps} \
+                 peak={pk_pedal}/{pk_target}/{pk_actual}/{pk_pps} hz={pk_hz} \
+                 curve={}/{}/{}/{} \
                  set_err={set_errs} wheel_err={wheel_errs} {}{}{}{}",
+                band_pps[0],
+                band_pps[1],
+                band_pps[2],
+                band_pps[3],
                 if faulted { "FAULT " } else { "" },
                 if braking { "BRAKE " } else { "" },
                 if locked_out { "LOCKOUT " } else { "" },
