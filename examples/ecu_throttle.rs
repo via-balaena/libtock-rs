@@ -156,7 +156,11 @@ fn main() {
                 console,
                 "ecu: pedal {raw:5} target {target:5} output {actual:5}{}{}",
                 if braking { " BRAKE" } else { "" },
-                if !ever_at_rest { " NOT-ARMED-AT-REST" } else { "" }
+                if !ever_at_rest {
+                    " NOT-ARMED-AT-REST"
+                } else {
+                    ""
+                }
             );
         }
 

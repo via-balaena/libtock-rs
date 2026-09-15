@@ -41,8 +41,8 @@ fn main() {
 
     // The capsule packs the pin and the duty cycle into one argument.
     let packed = PIN | (DUTY << 16);
-    let started = TockSyscalls::command(DRIVER_NUM, CMD_START, packed, FREQ_HZ)
-        .to_result::<(), ErrorCode>();
+    let started =
+        TockSyscalls::command(DRIVER_NUM, CMD_START, packed, FREQ_HZ).to_result::<(), ErrorCode>();
     let _ = writeln!(console, "pwm-owner: start pin {PIN} -> {started:?}");
 
     let _ = writeln!(

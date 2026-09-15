@@ -66,7 +66,10 @@ fn main() {
         if let Err(e) =
             TockSyscalls::command(PWM, PWM_START, packed, hz).to_result::<(), ErrorCode>()
         {
-            let _ = writeln!(console, "wheel: could not drive the source at {hz} Hz: {e:?}");
+            let _ = writeln!(
+                console,
+                "wheel: could not drive the source at {hz} Hz: {e:?}"
+            );
             continue;
         }
 

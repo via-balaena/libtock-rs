@@ -40,8 +40,7 @@ fn main() {
     let _ = Alarm::sleep_for(Milliseconds(3000));
 
     let packed = PIN | (DUTY << 16);
-    match TockSyscalls::command(DRIVER_NUM, CMD_START, packed, FREQ_HZ)
-        .to_result::<(), ErrorCode>()
+    match TockSyscalls::command(DRIVER_NUM, CMD_START, packed, FREQ_HZ).to_result::<(), ErrorCode>()
     {
         Ok(()) => {
             let _ = writeln!(
