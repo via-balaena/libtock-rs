@@ -18,10 +18,22 @@
 //! app reached the capsule first, nothing was queued, and **the test passed
 //! against a kernel that was demonstrably broken.**
 //!
-//! What makes it work is the console write below: console is asynchronous, so
-//! printing yields, and B gets to issue and queue its command before this app
-//! resumes into `fill`. That is an instrument-induced yield doing load-bearing
-//! work, which is worth knowing before anyone "tidies up" the print.
+//! The first working version depended on the console write below: console is
+//! asynchronous, so printing yields, and B got to issue and queue its command
+//! before this app resumed into `fill`. That is an instrument-induced yield
+//! doing load-bearing work -- correct, and invisible to anyone "tidying up" the
+//! print.
+//!
+//! **So the wait is explicit now, and it is bounded at BOTH ends.** Too short
+//! and B has not queued yet, which is the original failure: a pass that proves
+//! nothing. Too long and the panel has finished initialising, so there is no
+//! busy driver to dequeue into and the test passes for the other wrong reason.
+//! The window is roughly 1 ms at the bottom and the init gap -- 1,240 ms
+//! measured -- at the top. 50 ms sits two orders of magnitude clear of one end
+//! and twenty-five times clear of the other.
+//!
+//! The print stays, because the transcript is the evidence. It is no longer
+//! what makes the test work.
 //!
 //! So a PASS here is only meaningful alongside the console transcript showing
 //! both apps issuing before either completes. Verified both ways on a Pico 2 W:
@@ -34,7 +46,7 @@
 #![no_std]
 
 use core::fmt::Write;
-use libtock::alarm::Alarm;
+use libtock::alarm::{Alarm, Milliseconds};
 use libtock::console::Console;
 use libtock::display::Screen;
 use libtock::runtime::{set_main, stack_size};
@@ -45,9 +57,18 @@ stack_size! {0x400}
 fn main() {
     let mut console = Console::writer();
 
+    // Let B issue and queue its command first. See the module docs: this wait
+    // is bounded at both ends, and the test is meaningless outside that window
+    // in one direction and vacuous in the other.
+    const SETTLE_MS: u32 = 50;
+    let _ = Alarm::sleep_for(Milliseconds(SETTLE_MS));
+
     // No set_write_frame anywhere above this line -- that is the whole point.
     let t0 = Alarm::get_ticks().unwrap_or(0);
-    let _ = writeln!(console, "A: issuing fill at t={t0}");
+    let _ = writeln!(
+        console,
+        "A: issuing fill at t={t0} (after {SETTLE_MS} ms settle)"
+    );
     let mut buf = [0u8; 2];
     let filled = Screen::fill(&mut buf, 0x07E0);
     let _ = writeln!(console, "A: fill with no write frame -> {filled:?}");

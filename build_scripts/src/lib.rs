@@ -43,9 +43,19 @@ const PLATFORMS: &[(&str, &str, &str, &str, &str)] = &[
     // room to spare -- `kit_screen_bars.tbf` measures 10,176 bytes. 128K of RAM
     // apiece, contiguous, 256K total on a 520K part.
     //
-    // REASONED FROM THE ROW ABOVE, NOT FLASHED. The addresses have not been
-    // loaded on hardware; the failure mode if one is wrong is an app that will
-    // not load, which shows up immediately.
+    // FLASHED AND CONFIRMED 2026-09-15 with `screen_queued` in slot 1 and
+    // `screen_jostle` in slot 2, which reproduced the queued-command loss that
+    // tock 71e592db6 fixes. Both apps loaded at these addresses.
+    //
+    // BUNDLING THE TWO TBFs NEEDS A PADDING TBF BETWEEN THEM. The kernel walks
+    // the `.apps` section by total_size, so without one it stops at the end of
+    // app 1 and never reaches 0x100A0000 -- app 2 is simply not there, with no
+    // error to explain it. Padding is a bare 16-byte v2 header: version 2,
+    // header_size 16, total_size = the gap, flags 0, checksum = XOR of the
+    // other three words, and crucially NO Main and NO Program TLV, which is
+    // what makes it padding rather than a malformed app. The kernel logs
+    // "Unable to use process binary: Process item is just padding" and carries
+    // on.
     ("raspberry_pi_pico_2_w_slot1", "0x10090000", "64K"   , "0x2000A000", "128K"   ),
     ("raspberry_pi_pico_2_w_slot2", "0x100A0000", "64K"   , "0x2002A000", "128K"   ),
     ("stm32f3discovery"   , "0x08020000", "0x0020000", "0x20004000", "48K"    ),
