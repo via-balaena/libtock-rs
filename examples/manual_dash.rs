@@ -103,8 +103,11 @@ const RPM_DIVISOR: u64 = 194_000;
 
 const IDLE_RPM: u32 = 800;
 const REDLINE_RPM: u32 = 7_000;
-/// Below this in gear, it stalls.
-const STALL_RPM: u32 = 500;
+/// Below this throttle, a slipping clutch drags the engine down and it stalls.
+/// Above `SHIFT_LIFT` is where a shift is refused, so this sits well under it:
+/// selecting a gear at rest must never kill the engine before the driver has
+/// touched the throttle.
+const STALL_THROTTLE: u32 = 60;
 /// Where the shift light comes on.
 const SHIFT_LIGHT_RPM: u32 = 6_200;
 
@@ -452,28 +455,35 @@ impl State {
 
         if self.gear == 0 {
             // Neutral: revs chase the throttle and fall away without it.
-            let target = IDLE_RPM + (REDLINE_RPM - IDLE_RPM) * throttle / THROTTLE_FULL;
-            self.rpm = if target > self.rpm {
-                (self.rpm + REV_RISE_PER_S * dt / 1_000).min(target)
-            } else {
-                self.rpm
-                    .saturating_sub(REV_FALL_PER_S * dt / 1_000)
-                    .max(target)
-            };
+            self.rpm = free_rev(self.rpm, throttle, dt);
             self.speed = apply_drag(self.speed, 0, dt);
             return;
         }
 
-        // In gear, the engine is bolted to the road: rpm follows speed.
+        // In gear. The engine is bolted to the road ONLY once the road is
+        // turning it fast enough to idle -- below that the clutch has to slip,
+        // and without that there is no way to start moving at all.
         let couple = (RATIOS[self.gear] * FINAL_DRIVE) as u64;
-        self.rpm = ((self.speed as u64 * couple) / RPM_DIVISOR) as u32;
+        let implied = ((self.speed as u64 * couple) / RPM_DIVISOR) as u32;
 
-        if self.rpm < STALL_RPM && self.speed < 1_200 {
-            self.stalled = true;
-            self.rpm = 0;
-            return;
+        if implied < IDLE_RPM {
+            // SLIPPING. The engine revs to the throttle, as in neutral, and its
+            // torque still reaches the wheels. This is what lets the car pull
+            // away, and it is why the tach answers the throttle at a standstill.
+            if throttle < STALL_THROTTLE && self.speed > 0 {
+                // Rolling in gear with the throttle shut: the load drags it
+                // under. Stationary is allowed -- sitting in gear at idle is
+                // not a stall, and killing the engine the instant a gear is
+                // selected would make the box unusable.
+                self.stalled = true;
+                self.rpm = 0;
+                return;
+            }
+            self.rpm = free_rev(self.rpm.max(IDLE_RPM), throttle, dt);
+        } else {
+            // LOCKED. Road speed sets the revs, as before.
+            self.rpm = implied;
         }
-        self.rpm = self.rpm.max(IDLE_RPM);
 
         // Over the limiter the spark cuts, so no drive at all until it falls
         // back under. That is what makes short-shifting worth doing.
@@ -484,6 +494,18 @@ impl State {
         };
 
         self.speed = apply_drag(self.speed, drive, dt);
+    }
+}
+
+/// One tick of an engine that is not tied to the road: revs chase the throttle
+/// at the inertia rates, asymmetrically. Used in neutral and while the clutch
+/// slips, which are the same situation mechanically.
+fn free_rev(rpm: u32, throttle: u32, dt: u32) -> u32 {
+    let target = IDLE_RPM + (REDLINE_RPM - IDLE_RPM) * throttle / THROTTLE_FULL;
+    if target > rpm {
+        (rpm + REV_RISE_PER_S * dt / 1_000).min(target)
+    } else {
+        rpm.saturating_sub(REV_FALL_PER_S * dt / 1_000).max(target)
     }
 }
 
