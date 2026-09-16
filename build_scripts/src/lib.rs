@@ -58,6 +58,18 @@ const PLATFORMS: &[(&str, &str, &str, &str, &str)] = &[
     // on.
     ("raspberry_pi_pico_2_w_slot1", "0x10090000", "64K"   , "0x2000A000", "128K"   ),
     ("raspberry_pi_pico_2_w_slot2", "0x100A0000", "64K"   , "0x2002A000", "128K"   ),
+    // BENCH: the scheduler-jitter pair, at the kernel session's requested 0x2000
+    // pitch. Flash slot 1 is padded to 0x2000 with a padding TBF so slot 2's
+    // address does not move when the probe changes size.
+    //
+    // THE RAM SPLIT IS THE PART THAT IS NOT OPTIONAL. The plain
+    // `raspberry_pi_pico_2_w` row grants RAM 0x2000A000 + 480K, which ends at
+    // 0x20082000 -- the top of the RP2350's 520K SRAM. An app linked there
+    // leaves nothing for a second process, so relinking only the second app's
+    // FLASH cannot work; both rows have to shrink. 128K + 64K here, adjacent
+    // and 4K-aligned (libtock_layout.ld asserts RAM_START % 0x1000 == 0).
+    ("raspberry_pi_pico_2_w_probe", "0x10090000", "8K"    , "0x2000A000", "128K"   ),
+    ("raspberry_pi_pico_2_w_hog"  , "0x10092000", "8K"    , "0x2002A000", "64K"    ),
     ("stm32f3discovery"   , "0x08020000", "0x0020000", "0x20004000", "48K"    ),
     ("stm32f412gdiscovery", "0x08030000", "256K"     , "0x20004000", "112K"   ),
     ("nano33ble"          , "0x00050000", "704K"     , "0x20005000", "240K"   ),
