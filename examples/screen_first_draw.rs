@@ -59,6 +59,25 @@
 //! capsule with no buffer involved, so a difference between the two is
 //! informative.
 //!
+//! # Reading the timestamps
+//!
+//! `t=` is when the attempt **started** — kernel tick zero, not process start.
+//! The two `+` fields are how long each of the two calls took, clocked between
+//! them and before anything is printed, because the console write blocks for
+//! the UART and would otherwise be inside the measurement.
+//!
+//! So `t=34 frame +1224 | write +2` says the frame call was issued 34 ms after
+//! tick zero and did not answer for 1,224 ms, and the write that followed it
+//! took 2. **That is one call absorbing the readiness gap, not both** — which
+//! is the whole reason the two are clocked apart. A single per-attempt
+//! timestamp cannot tell those apart, and the obvious reading of one, that the
+//! write was accepted early and completed late, is wrong.
+//!
+//! This is still not the instrument for the gap itself. It reports when *this
+//! app* stopped waiting, which is the gap minus however late the process
+//! started. `screen_ready.rs` is the one that measures it: one call, clock at
+//! both ends.
+//!
 //! # What a timeout does to the lines after it
 //!
 //! Nothing cancels an accepted command. After a timeout, an upcall may still
@@ -230,8 +249,16 @@ fn main() {
         attempt += 1;
         let attempt_start = now;
 
+        // Clocked between and after the two calls, and BEFORE anything is
+        // printed. The console write below blocks for the UART -- about 8 ms
+        // for a line this long at 115200 -- so a clock read taken after it
+        // would fold the transmission into the measurement. An earlier version
+        // timestamped the first success after printing, which inflated it by
+        // exactly that.
         let frame = frame_step(0, 0, band_w, band_h, timeout_ticks);
+        let after_frame = Alarm::get_ticks().unwrap_or(0);
         let write = write_step(&band[..band_bytes], timeout_ticks);
+        let after_write = Alarm::get_ticks().unwrap_or(0);
 
         // Tally the write, which is the call that carries the buffer.
         match write.outcome {
@@ -245,8 +272,10 @@ fn main() {
         let mark = if poisoned { "!" } else { " " };
         let _ = writeln!(
             console,
-            "{mark}t={:>6} ms #{attempt:<2} frame {frame} | write {write}\r",
-            ms(now, hz)
+            "{mark}t={:>6} ms #{attempt:<2} frame +{:<5} {frame} | write +{:<5} {write}\r",
+            ms(now, hz),
+            ms(after_frame.wrapping_sub(now), hz),
+            ms(after_write.wrapping_sub(after_frame), hz)
         );
 
         if matches!(frame.outcome, Outcome::Timeout) || matches!(write.outcome, Outcome::Timeout) {
@@ -254,8 +283,7 @@ fn main() {
         }
 
         if write.succeeded() && first_success_ms.is_none() {
-            let t = Alarm::get_ticks().unwrap_or(0);
-            first_success_ms = Some(ms(t, hz));
+            first_success_ms = Some(ms(after_write, hz));
             // The second channel: the panel itself. The band above already
             // painted; this makes it the whole screen so it cannot be missed
             // or mistaken for leftover content.
@@ -265,7 +293,7 @@ fn main() {
                 console,
                 " t={:>6} ms FIRST DRAW -- painting full screen: frame {full} | \
                  fill {fill}\r",
-                ms(t, hz)
+                ms(after_write, hz)
             );
         }
 

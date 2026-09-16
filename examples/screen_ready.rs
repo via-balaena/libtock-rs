@@ -18,6 +18,10 @@
 //! * BUSY at ~0 ms  -> the command was discarded; an app must retry.
 //! * Ok at ~1250 ms -> it was queued and the ready path ran it.
 //!
+//! Observed 2026-09-16, four bench runs across two kernels: always the second,
+//! never the first. See `screen_first_draw.rs`, which retries and reports the
+//! raw codes rather than translating them.
+//!
 //! Build the board with `kit_display`.
 
 #![no_main]
