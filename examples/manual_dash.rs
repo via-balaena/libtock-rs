@@ -103,11 +103,11 @@ const RPM_DIVISOR: u64 = 194_000;
 
 const IDLE_RPM: u32 = 800;
 const REDLINE_RPM: u32 = 7_000;
-/// Below this throttle, a slipping clutch drags the engine down and it stalls.
-/// Above `SHIFT_LIFT` is where a shift is refused, so this sits well under it:
-/// selecting a gear at rest must never kill the engine before the driver has
-/// touched the throttle.
-const STALL_THROTTLE: u32 = 60;
+/// Constant rolling resistance, the term that actually brings the car to rest.
+/// Without it the drag force at low speed divided by inertia truncated to zero
+/// and the car coasted forever -- 30 km/h to a standstill takes 59 s with it,
+/// which is about what a real car in neutral does.
+const DRAG_ROLL: u64 = 22_000;
 /// Where the shift light comes on.
 const SHIFT_LIGHT_RPM: u32 = 6_200;
 
@@ -118,8 +118,8 @@ const TICK_MS: u32 = 10;
 const DT_MIN_MS: u32 = 1;
 const DT_MAX_MS: u32 = 60;
 
-/// Drag. Linear term is rolling resistance, square term is aero. Both are
-/// FORCES, in the same units as drive -- see `apply_drag`.
+/// Drag. Linear term is speed-dependent losses, square term is aero. Both are
+/// FORCES, in the same units as drive -- see `State::integrate`.
 const DRAG_LINEAR: u64 = 90;
 const DRAG_SQUARE: u64 = 440;
 /// Bigger is heavier: divides NET force before it becomes acceleration.
@@ -234,7 +234,8 @@ fn main() {
          (GP14, right) = DOWN\r\n\
          \x20 a shift only takes below {SHIFT_LIFT}/{THROTTLE_FULL} throttle -- \
          ask with the power on\r\n\
-         \x20 and it drops to neutral. Lift, shift, power.\r"
+         \x20 and it drops to neutral. Lift, shift, power.\r\n\
+         \x20 both buttons together = reset to neutral at rest, strip goes blue.\r"
     );
 
     // Static furniture, drawn once.
@@ -244,7 +245,7 @@ fn main() {
         gear: 0,
         rpm: IDLE_RPM,
         speed: 0,
-        stalled: false,
+        rem: 0,
     };
 
     // Everything the display is currently showing, so only differences are
@@ -298,20 +299,30 @@ fn main() {
         up_was = up_now;
         down_was = down_now;
 
-        if want_up || want_down {
+        // BOTH BUTTONS: back to a known state. Any state the driver cannot
+        // leave using the controls on the board is a dead end -- when the
+        // gearbox last trapped itself, the board could not say so and a human
+        // had to. This costs four lines and removes that class.
+        let both_reset = up_now && down_now;
+        if both_reset {
+            st = State {
+                gear: 0,
+                rpm: IDLE_RPM,
+                speed: 0,
+                rem: 0,
+            };
+            missed_for = 0;
+        } else if want_up || want_down {
             if throttle >= SHIFT_LIFT {
                 // Refused. The box does not take it and you lose drive.
                 st.gear = 0;
-                st.stalled = false;
                 missed_for = 60;
             } else if want_up {
                 if st.gear < TOP_GEAR {
                     st.gear += 1;
                 }
-                st.stalled = false;
             } else if st.gear > 0 {
                 st.gear -= 1;
-                st.stalled = false;
             }
         }
 
@@ -329,7 +340,10 @@ fn main() {
             shown_segs = lit;
         }
 
-        let light = if st.stalled {
+        let light = if both_reset {
+            // Visible confirmation on the glass, not just in a transcript --
+            // the driver holding both buttons is the one person who cannot
+            // read the console.
             BLUE
         } else if st.rpm >= REDLINE_RPM {
             RED
@@ -350,7 +364,7 @@ fn main() {
         } else {
             DIGITS[st.gear]
         };
-        let gear_colour = if st.stalled { RED } else { WHITE };
+        let gear_colour = WHITE;
         if gear_mask != shown_gear_mask {
             draw_seg_diff(
                 &mut paint,
@@ -419,7 +433,7 @@ fn main() {
                 paint.errs,
                 paint.clipped,
                 paint.last,
-                if st.stalled { " STALLED" } else { "" }
+                if both_reset { " RESET" } else { "" }
             );
         }
 
@@ -437,26 +451,21 @@ struct State {
     rpm: u32,
     /// Millimetres per second.
     speed: u32,
-    stalled: bool,
+    /// Sub-millimetre remainder carried between ticks.
+    ///
+    /// **Without it every coast below about 70 km/h truncated to zero.** The
+    /// drag force divided by inertia came to less than 1 mm/s per tick, integer
+    /// division threw it away, and the car held its speed forever -- which on
+    /// the glass read as a frozen dashboard.
+    rem: i64,
 }
 
 impl State {
     fn step(&mut self, throttle: u32, dt: u32) {
-        if self.stalled {
-            // Dead engine. It still rolls, and it still slows down.
-            self.rpm = 0;
-            self.speed = apply_drag(self.speed, 0, dt);
-            if self.gear == 0 {
-                self.stalled = false;
-                self.rpm = IDLE_RPM;
-            }
-            return;
-        }
-
         if self.gear == 0 {
             // Neutral: revs chase the throttle and fall away without it.
             self.rpm = free_rev(self.rpm, throttle, dt);
-            self.speed = apply_drag(self.speed, 0, dt);
+            self.integrate(0, dt);
             return;
         }
 
@@ -470,15 +479,18 @@ impl State {
             // SLIPPING. The engine revs to the throttle, as in neutral, and its
             // torque still reaches the wheels. This is what lets the car pull
             // away, and it is why the tach answers the throttle at a standstill.
-            if throttle < STALL_THROTTLE && self.speed > 0 {
-                // Rolling in gear with the throttle shut: the load drags it
-                // under. Stationary is allowed -- sitting in gear at idle is
-                // not a stall, and killing the engine the instant a gear is
-                // selected would make the box unusable.
-                self.stalled = true;
-                self.rpm = 0;
-                return;
-            }
+            // **Lifting off IS the clutch**, which is Jon's whole control
+            // scheme, so releasing the throttle below lock speed disengages
+            // rather than loading the engine down. There is no stall here and
+            // there should not be: the gate that lets a shift through is
+            // `throttle < SHIFT_LIFT`, so any stall condition that also
+            // triggers on a released throttle makes *preparing to shift* and
+            // *stalling* the same event -- and below first gear's 4.6 km/h lock
+            // speed there was then no sequence that got out of first at all.
+            //
+            // Drive already scales with throttle, so a released throttle
+            // produces no drive without needing a special case; the car simply
+            // coasts.
             self.rpm = free_rev(self.rpm.max(IDLE_RPM), throttle, dt);
         } else {
             // LOCKED. Road speed sets the revs, as before.
@@ -493,7 +505,7 @@ impl State {
             (torque(self.rpm) as u64 * throttle as u64 * couple) / (1_000 * 100)
         };
 
-        self.speed = apply_drag(self.speed, drive, dt);
+        self.integrate(drive, dt);
     }
 }
 
@@ -521,21 +533,28 @@ fn torque(rpm: u32) -> u32 {
     }
 }
 
-/// One tick of speed: net force over inertia.
+/// One tick of speed: net force over inertia, carrying the remainder.
 ///
 /// **Drive and drag are both forces and both divide by `INERTIA`.** An earlier
 /// version subtracted drag from speed directly, which made the two terms
-/// different units -- first gear then reached the limiter in 20 ms. Caught by
-/// simulating this exact arithmetic on the host before it went to the bench,
-/// which is the only way to check a feel you cannot feel yet.
-fn apply_drag(speed: u32, drive: u64, dt: u32) -> u32 {
-    let s = speed as u64;
-    let dt = dt as u64;
-    let drag = (DRAG_LINEAR * s) / 1_000 + (DRAG_SQUARE * s * s) / 10_000_000;
-    if drive >= drag {
-        (s + ((drive - drag) * dt) / INERTIA).min(u32::MAX as u64) as u32
-    } else {
-        s.saturating_sub(((drag - drive) * dt) / INERTIA) as u32
+/// different units -- first gear then reached the limiter in 20 ms.
+///
+/// The carry is the second fix and a separate bug: at these constants a coast
+/// below roughly 70 km/h produced less than 1 mm/s of change per tick, integer
+/// division discarded it, and the car held its speed indefinitely. Keeping the
+/// remainder makes arbitrarily small forces integrate correctly over time,
+/// which is what a fixed-point integrator has to do to be one at all.
+impl State {
+    fn integrate(&mut self, drive: u64, dt: u32) {
+        let s = self.speed as i64;
+        let drag = (DRAG_ROLL
+            + (DRAG_LINEAR * s as u64) / 1_000
+            + (DRAG_SQUARE * (s * s) as u64) / 10_000_000) as i64;
+        let num = (drive as i64 - drag) * dt as i64 + self.rem;
+        let inertia = INERTIA as i64;
+        let delta = num.div_euclid(inertia);
+        self.rem = num.rem_euclid(inertia);
+        self.speed = (s + delta).max(0) as u32;
     }
 }
 
