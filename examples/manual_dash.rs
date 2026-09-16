@@ -282,6 +282,14 @@ fn main() {
     let mut up_was = false;
     let mut down_was = false;
     let mut missed_for = 0u32;
+    // Accepted shifts per button and refusals, monotonic. A 1 Hz sample of
+    // `up=`/`dn=` cannot catch a press between prints -- every capture so far
+    // has shown both zero, which says nothing. Counts survive the gap, and
+    // separating the two buttons answers which one the driver means by "left"
+    // without asking him to describe it again.
+    let mut ups = 0u32;
+    let mut dns = 0u32;
+    let mut refused = 0u32;
     let mut tick: u32 = 0;
 
     let hz = Alarm::get_frequency()
@@ -328,15 +336,29 @@ fn main() {
             missed_for = 0;
         } else if want_up || want_down {
             if throttle >= SHIFT_LIFT {
-                // Refused. The box does not take it and you lose drive.
-                st.gear = 0;
+                // REFUSED: the box will not take it with the power on. The gear
+                // does not change.
+                //
+                // It used to drop to neutral, chosen for legibility back when
+                // the car could not move at all. Now that it can, ejecting the
+                // driver from gear at 28 km/h leaves no way back in without
+                // almost stopping -- a punishment out of all proportion to
+                // lifting a fraction too late, and one that reads as a bug even
+                // when the logic is right. The cost of a missed shift is
+                // already real without it: you do not get the gear, and the
+                // engine keeps climbing toward the limiter while you try again.
+                refused = refused.saturating_add(1);
                 missed_for = 60;
             } else if want_up {
                 if st.gear < TOP_GEAR {
                     st.gear += 1;
                 }
-            } else if st.gear > 0 {
-                st.gear -= 1;
+                ups = ups.saturating_add(1);
+            } else {
+                if st.gear > 0 {
+                    st.gear -= 1;
+                }
+                dns = dns.saturating_add(1);
             }
         }
 
@@ -435,7 +457,7 @@ fn main() {
             let _ = writeln!(
                 console,
                 "manual_dash: gear={} rpm={} kmh={} thr={} dt={}ms up={} dn={} \
-                 draws={} err={} clip={} last={:?}{}\r",
+                 ups={} dns={} ref={} draws={} err={} clip={} last={:?}{}\r",
                 if st.gear == 0 { 0 } else { st.gear },
                 st.rpm,
                 kmh,
@@ -443,6 +465,9 @@ fn main() {
                 dt,
                 up_now as u8,
                 down_now as u8,
+                ups,
+                dns,
+                refused,
                 paint.calls,
                 paint.errs,
                 paint.clipped,
