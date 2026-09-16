@@ -64,6 +64,7 @@ use libtock::alarm::{Alarm, Milliseconds};
 use libtock::buttons::Buttons;
 use libtock::console::Console;
 use libtock::display::Screen;
+use libtock::platform::ErrorCode;
 use libtock::runtime::{set_main, stack_size};
 
 set_main! {main}
@@ -123,9 +124,21 @@ const DRAG_SQUARE: u64 = 440;
 /// gear 0-40 km/h in 1.9 s, 0-100 in 8.3 s, 202 km/h terminal in sixth.
 const INERTIA: u64 = 165_000;
 
-/// How fast free revs chase the throttle in neutral, and decay without it.
-const NEUTRAL_RISE: u32 = 420;
-const NEUTRAL_FALL: u32 = 260;
+/// Engine inertia in neutral, **rpm per second**, and deliberately asymmetric:
+/// a small four blips up faster than it falls, because combustion torque
+/// against the flywheel is stronger than engine braking. Getting that backwards
+/// reads as wrong to someone who cannot say why.
+///
+/// 800 -> 7000 in ~0.65 s, 7000 -> 800 in ~1.24 s. The previous values were a
+/// rate per tick rather than per second and swept the whole range in 148 ms,
+/// which is where "the bars advance and retreat too fast" came from -- the
+/// engine had a rate limit, it was just four times too quick to read as a
+/// gauge.
+///
+/// **In gear there is no equivalent and there should not be**: rpm is tied to
+/// road speed, so the inertia is already carried by vehicle mass.
+const REV_RISE_PER_S: u32 = 9_500;
+const REV_FALL_PER_S: u32 = 5_000;
 
 // ---------------------------------------------------------------------------
 // Palette and layout
@@ -204,7 +217,8 @@ fn main() {
     // because the capsule queues a command it is not ready for and serves it
     // when it is. Everything after it is cheap.
     let (w, h) = Screen::get_resolution().unwrap_or((480, 320));
-    rect(0, 0, w, h, BG);
+    let mut paint = Paint::default();
+    paint.rect(0, 0, w, h, BG);
 
     let _ = writeln!(
         console,
@@ -217,7 +231,7 @@ fn main() {
     );
 
     // Static furniture, drawn once.
-    rect(TACH_X, TACH_Y, TACH_W, TACH_H, DIM);
+    paint.rect(TACH_X, TACH_Y, TACH_W, TACH_H, DIM);
 
     let mut st = State {
         gear: 0,
@@ -291,9 +305,9 @@ fn main() {
         let lit = tach_width(st.rpm);
         if lit != shown_segs {
             if lit > shown_segs {
-                tach_span(shown_segs, lit, true);
+                tach_span(&mut paint, shown_segs, lit, true);
             } else {
-                tach_span(lit, shown_segs, false);
+                tach_span(&mut paint, lit, shown_segs, false);
             }
             shown_segs = lit;
         }
@@ -310,7 +324,7 @@ fn main() {
             BG
         };
         if light != shown_light {
-            rect(0, LIGHT_Y, w, LIGHT_H, light);
+            paint.rect(0, LIGHT_Y, w, LIGHT_H, light);
             shown_light = light;
         }
 
@@ -322,6 +336,7 @@ fn main() {
         let gear_colour = if st.stalled { RED } else { WHITE };
         if gear_mask != shown_gear_mask {
             draw_seg_diff(
+                &mut paint,
                 GEAR_X,
                 GEAR_Y,
                 GEAR_W,
@@ -351,7 +366,17 @@ fn main() {
         for (i, m) in want.iter().enumerate() {
             if *m != shown_spd[i] {
                 let x = SPD_X + i as u32 * (SPD_W + SPD_GAP);
-                draw_seg_diff(x, SPD_Y, SPD_W, SPD_H, SPD_T, shown_spd[i], *m, GREEN);
+                draw_seg_diff(
+                    &mut paint,
+                    x,
+                    SPD_Y,
+                    SPD_W,
+                    SPD_H,
+                    SPD_T,
+                    shown_spd[i],
+                    *m,
+                    GREEN,
+                );
                 shown_spd[i] = *m;
             }
         }
@@ -364,7 +389,8 @@ fn main() {
         if tick % 100 == 0 {
             let _ = writeln!(
                 console,
-                "manual_dash: gear={} rpm={} kmh={} thr={} dt={}ms up={} dn={}{}\r",
+                "manual_dash: gear={} rpm={} kmh={} thr={} dt={}ms up={} dn={} \
+                 draws={} err={} last={:?}{}\r",
                 if st.gear == 0 { 0 } else { st.gear },
                 st.rpm,
                 kmh,
@@ -372,6 +398,9 @@ fn main() {
                 dt,
                 up_now as u8,
                 down_now as u8,
+                paint.calls,
+                paint.errs,
+                paint.last,
                 if st.stalled { " STALLED" } else { "" }
             );
         }
@@ -410,11 +439,11 @@ impl State {
             // Neutral: revs chase the throttle and fall away without it.
             let target = IDLE_RPM + (REDLINE_RPM - IDLE_RPM) * throttle / THROTTLE_FULL;
             self.rpm = if target > self.rpm {
-                (self.rpm + NEUTRAL_RISE * dt / 10).min(target)
+                (self.rpm + REV_RISE_PER_S * dt / 1_000).min(target)
             } else {
                 self.rpm
-                    .saturating_sub(NEUTRAL_FALL * dt / 10)
-                    .max(target.min(IDLE_RPM))
+                    .saturating_sub(REV_FALL_PER_S * dt / 1_000)
+                    .max(target)
             };
             self.speed = apply_drag(self.speed, 0, dt);
             return;
@@ -506,12 +535,12 @@ fn tach_width(rpm: u32) -> u32 {
 /// rather than blocks: the alternative rule -- draw segments individually up to
 /// four, then repaint the whole bar -- cannot be done in one call, since a
 /// `fill` paints one colour and the bar has three.
-fn tach_span(from: u32, to: u32, lit: bool) {
+fn tach_span(p: &mut Paint, from: u32, to: u32, lit: bool) {
     if to <= from {
         return;
     }
     if !lit {
-        rect(TACH_X + from, TACH_Y, to - from, TACH_H, DIM);
+        p.rect(TACH_X + from, TACH_Y, to - from, TACH_H, DIM);
         return;
     }
     for (lo, hi, colour) in [
@@ -522,7 +551,7 @@ fn tach_span(from: u32, to: u32, lit: bool) {
         let a = from.max(lo);
         let b = to.min(hi);
         if b > a {
-            rect(TACH_X + a, TACH_Y, b - a, TACH_H, colour);
+            p.rect(TACH_X + a, TACH_Y, b - a, TACH_H, colour);
         }
     }
 }
@@ -533,7 +562,7 @@ fn tach_span(from: u32, to: u32, lit: bool) {
 /// 88 -> 89 touches two rectangles. A glyph blit would move the entire cell
 /// every time the last digit ticked.
 #[allow(clippy::too_many_arguments)]
-fn draw_seg_diff(x: u32, y: u32, w: u32, h: u32, t: u32, old: u8, new: u8, on: u16) {
+fn draw_seg_diff(p: &mut Paint, x: u32, y: u32, w: u32, h: u32, t: u32, old: u8, new: u8, on: u16) {
     let changed = old ^ new;
     if changed == 0 {
         return;
@@ -553,19 +582,48 @@ fn draw_seg_diff(x: u32, y: u32, w: u32, h: u32, t: u32, old: u8, new: u8, on: u
             5 => (x, y + t, t, half),                         // F, upper left
             _ => (x + t, y + t + half, w - 2 * t, t),         // G, middle
         };
-        rect(sx, sy, sw, sh, colour);
+        p.rect(sx, sy, sw, sh, colour);
     }
 }
 
 /// One solid rectangle. Errors are ignored on purpose: a dropped frame on a
 /// dashboard is a stale pixel, and stopping to report it would cost the next
 /// one too. `screen_bench` is where drawing cost gets measured.
-fn rect(x: u32, y: u32, w: u32, h: u32, colour: u16) {
-    if w == 0 || h == 0 {
-        return;
-    }
-    if Screen::set_write_frame(x, y, w, h).is_ok() {
-        let mut pixel = [0u8; 2];
-        let _ = Screen::fill(&mut pixel, colour);
+/// Draw-call accounting.
+///
+/// A frozen display has at least three causes and they are indistinguishable
+/// from the glass: the app stopped issuing draws, the capsule started refusing
+/// them, or the driver stopped acting on them. **`calls` separates the first
+/// from the other two and `errs`/`last` separate the second from the third**,
+/// and none of that is recoverable after the fact — it has to be in the
+/// transcript while it happens.
+///
+/// Note what a live telemetry line already rules out: a screen call that never
+/// returns would block the loop in `yield_wait`, so if `dt` is still printing,
+/// the app is not stuck inside a draw.
+#[derive(Default)]
+struct Paint {
+    calls: u32,
+    errs: u32,
+    last: Option<ErrorCode>,
+}
+
+impl Paint {
+    fn rect(&mut self, x: u32, y: u32, w: u32, h: u32, colour: u16) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        self.calls += 1;
+        let r = match Screen::set_write_frame(x, y, w, h) {
+            Ok(()) => {
+                let mut pixel = [0u8; 2];
+                Screen::fill(&mut pixel, colour)
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = r {
+            self.errs += 1;
+            self.last = Some(e);
+        }
     }
 }
