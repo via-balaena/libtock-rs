@@ -25,10 +25,17 @@ pub struct TockMonochrome8BitPage128x64Screen {
 /// pixel, eight vertical pixels to a byte, so a mono format of either spelling
 /// takes these bytes unchanged.
 ///
-/// Both are listed because kernels disagree about which one `ssd1306` reports:
-/// some answer `Mono` (0) and some `Mono_8BitPage` (6) for the same hardware
-/// and the same buffer layout. Checking against only one of them rejects the
-/// panel this adapter is named for.
+/// Both are listed because they are the same format either side of one kernel
+/// commit. Tock `35ca7fa07` (2025-08-04) added `Mono_8BitPage = 6` to the HIL
+/// and moved `ssd1306` and `sh1106` off `Mono = 0` — same hardware, same buffer
+/// layout, different number. So a kernel built before that date reports 0 and
+/// one built after reports 6, and checking against either alone rejects the
+/// panel this adapter is named for on half the kernels in existence.
+///
+/// **This is a pin boundary, not a fork difference.** Both drivers are
+/// identical to upstream on both sides of it, so do not go looking for a
+/// divergence to blame. The 0 can be dropped once libtock-rs pins tock past
+/// 2025-08-04.
 const MONO_FORMATS: [u32; 2] = [0, 6];
 
 impl Default for TockMonochrome8BitPage128x64Screen {
