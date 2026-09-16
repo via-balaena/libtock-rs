@@ -14,32 +14,22 @@ pub struct TockMonochrome8BitPage128x64Screen {
     framebuffer: [u8; (128 * 64) / 8],
     width: u32,
     height: u32,
-    /// Whether the kernel accepted what `new` asked it for.
+    /// Whether this screen can actually display what `flush` will send it.
     ///
-    /// `new` cannot return a `Result` without removing `Default`, and a screen
-    /// whose pixel format was refused cannot draw anything correct, so the
-    /// error is kept here and answered by `flush` and `setup_result`.
-    ///
-    /// **A `BUSY` stored here is not a refusal -- it means the question was
-    /// never answered.** A screen driver still running its init sequence
-    /// answers BUSY to `set_pixel_format` regardless of the format, so an
-    /// adapter constructed early records BUSY for a format that might well be
-    /// supported. Nothing re-asks: this is sampled once, in `new`.
-    ///
-    /// The effect is safe but sticky. `flush` refuses to draw, which is right,
-    /// but it reports a transient-looking code for a state that will not
-    /// change on its own. **Construct this after the screen is ready, or check
-    /// `setup_result` and rebuild if it is `BUSY`.** Re-asking on first `flush`
-    /// would fix it properly and needs interior mutability, so it is
-    /// deliberately not done here.
-    ///
-    /// On this fork the cold-boot path differs again: the capsule queues a
-    /// BUSY command and reports the driver's real answer in the upcall, which
-    /// `Screen::set_pixel_format` now reads -- so here a cold boot stores the
-    /// true `INVAL` rather than `BUSY`. That is a property of our capsule, not
-    /// of upstream's.
+    /// `new` cannot return a `Result` without removing `Default`, so the
+    /// answer is kept here and reported by `flush` and `setup_result`.
     setup: Result<(), ErrorCode>,
 }
+
+/// Pixel formats this adapter's framebuffer can drive. It packs one bit per
+/// pixel, eight vertical pixels to a byte, so a mono format of either spelling
+/// takes these bytes unchanged.
+///
+/// Both are listed because kernels disagree about which one `ssd1306` reports:
+/// some answer `Mono` (0) and some `Mono_8BitPage` (6) for the same hardware
+/// and the same buffer layout. Checking against only one of them rejects the
+/// panel this adapter is named for.
+const MONO_FORMATS: [u32; 2] = [0, 6];
 
 impl Default for TockMonochrome8BitPage128x64Screen {
     fn default() -> Self {
@@ -49,21 +39,25 @@ impl Default for TockMonochrome8BitPage128x64Screen {
 
 impl TockMonochrome8BitPage128x64Screen {
     pub fn new() -> Self {
-        // Because this is a specific type of screen with a specific pixel
-        // format, we tell the kernel that is the pixel format we expect.
+        // DO NOT ask the driver to CHANGE its format, and do not judge this
+        // screen by what it answers if you do. No driver in tree can change
+        // one: `ssd1306` answers NOSUPPORT to every format including the one
+        // it already uses, and `st77xx` answers INVAL to everything but
+        // RGB_565 -- and BUSY, for any format at all, while it is still
+        // initialising. None of those answers says whether this adapter's
+        // bytes will be interpreted correctly, which is the only question.
         //
-        // Both of these can fail, and neither failure is safe to discard. A
-        // driver that refuses the format keeps the one it already has, and
-        // every byte written afterwards is then interpreted in that other
-        // format; a resolution this could not read leaves a 0x0 write frame
-        // that 1024 bytes are pushed into. Verified on the Raspberry Pi Pico
-        // 2's ST7796, where `st77xx::set_pixel_format` answers INVAL for
-        // everything except RGB_565 -- so asking for Mono_8BitPage there and
-        // ignoring the answer draws a monochrome framebuffer into an RGB565
-        // panel.
-        const MONO_8_BIT_PAGE: usize = 6;
+        // Ask that question directly instead. `get_pixel_format` reads the
+        // driver's own getter with no state check, no queue and no upcall, so
+        // it is answerable at any point in boot and cannot be deferred.
         let (setup, width, height) = match Screen::get_resolution() {
-            Ok((width, height)) => (Screen::set_pixel_format(MONO_8_BIT_PAGE), width, height),
+            Ok((width, height)) => match Screen::get_pixel_format() {
+                Ok(format) if MONO_FORMATS.contains(&format) => (Ok(()), width, height),
+                Ok(_) => (Err(ErrorCode::NoSupport), width, height),
+                Err(e) => (Err(e), width, height),
+            },
+            // A resolution this could not read leaves a 0x0 write frame with
+            // 1024 bytes pushed into it.
             Err(e) => (Err(e), 0, 0),
         };
 
@@ -75,8 +69,8 @@ impl TockMonochrome8BitPage128x64Screen {
         }
     }
 
-    /// Whether the kernel accepted this screen's resolution query and pixel
-    /// format.
+    /// Whether this screen reported a resolution and a format this adapter
+    /// can drive.
     ///
     /// `flush` answers the same error, so this is only needed to fail before
     /// drawing rather than at the first draw.
