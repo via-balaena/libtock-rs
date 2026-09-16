@@ -37,8 +37,9 @@
 //! # The latency spread is the corroboration
 //!
 //! If the capsule is serialising correctly, this app's small writes queue
-//! behind app A's full-screen fills, which are about 40 ms each. So the max
-//! should land near a fill and the min near an uncontended write. A max that
+//! behind app A's full-screen fills, which are about **54 ms** each — the
+//! measured cost, not the 39.32 ms wire floor. So the max should land near a
+//! fill, and so should the min if every write waits one. A max that
 //! looks uncontended means app A was not actually running, which would make a
 //! clean result meaningless — check that before reading anything into it.
 

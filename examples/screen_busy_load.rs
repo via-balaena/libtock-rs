@@ -10,7 +10,7 @@
 //! The load wants the driver occupied for as long as possible per syscall.
 //! `fill` sends **two bytes** and the capsule replicates them into its own
 //! 12,800-byte buffer, chunking until the frame is covered — so a full-screen
-//! fill is about 40 ms of wire time for 2 bytes of RAM. A `write` of the same
+//! fill is about **54 ms** for 2 bytes of RAM. A `write` of the same
 //! area would need a 307,200-byte buffer, which does not fit in the slot's
 //! 128K grant. The point is occupancy, and `fill` buys far more of it.
 //!
@@ -22,6 +22,15 @@
 //! for. It reports at the end, and app B carries the measurement.
 //!
 //! # Reading it with B
+//!
+//! Measured 2026-09-16: 53.9 ms per fill, and B's max write latency 53.7 ms.
+//! An earlier version of this comment said ~40 ms, which is the **derivable
+//! wire floor** — 480x320 at 16 bpp over a 62.5 MHz SPI is 39.32 ms — and not
+//! what the panel costs. `screen_bench`'s own header says the floor is not the
+//! budget; the measured model there (~1.16 ms fixed + 0.338 us/px) predicts
+//! 53.1 ms for a full screen, which is the number that should have been
+//! quoted. The right figure was already measured and the wrong one was merely
+//! easier to derive.
 //!
 //! B's `max` write latency should land near one of these fills. If it does
 //! not, this app was not actually loading the driver and B's clean result

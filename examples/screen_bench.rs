@@ -58,7 +58,7 @@ set_main! {main}
 stack_size! {0x8000}
 
 /// Runs per size. Enough to see a spread without making the 480x320 row take
-/// all day: at roughly 40 ms a full-screen fill, 16 of them is under a second.
+/// all day: at roughly 54 ms a full-screen fill, 16 of them is under a second.
 const REPS: usize = 16;
 
 /// Rectangles to time, widest last. The last is the whole panel.
