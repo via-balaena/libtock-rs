@@ -136,13 +136,20 @@ const RED: u16 = 0xF800;
 const WHITE: u16 = 0xFFFF;
 const BLUE: u16 = 0x041F;
 
-/// Tach bar: segments across the top.
-const TACH_SEGS: u32 = 16;
-const TACH_X: u32 = 8;
+/// Tach bar across the top. **Continuous, not discrete blocks** -- see
+/// `tach_span` for why the measurement chose that.
+const TACH_X: u32 = 10;
 const TACH_Y: u32 = 12;
-const TACH_W: u32 = 28;
 const TACH_H: u32 = 44;
-const TACH_GAP: u32 = 2;
+/// 10..470 on a 480-wide panel. An earlier 16x(28+2) layout ran to x=486 and
+/// off the right edge; arithmetic, not eyesight, caught it.
+const TACH_W: u32 = 460;
+/// Quantisation. 46 steps of 10 px, about 152 rpm each -- fine enough to read
+/// as movement, coarse enough that most ticks redraw nothing at all.
+const TACH_STEP: u32 = 10;
+/// Band edges as offsets into the bar.
+const BAND_AMBER: u32 = TACH_W * SHIFT_LIGHT_RPM / REDLINE_RPM;
+const BAND_RED: u32 = TACH_W * (REDLINE_RPM - 400) / REDLINE_RPM;
 
 const LIGHT_Y: u32 = 66;
 const LIGHT_H: u32 = 14;
@@ -207,9 +214,7 @@ fn main() {
     );
 
     // Static furniture, drawn once.
-    for i in 0..TACH_SEGS {
-        rect(seg_x(i), TACH_Y, TACH_W, TACH_H, DIM);
-    }
+    rect(TACH_X, TACH_Y, TACH_W, TACH_H, DIM);
 
     let mut st = State {
         gear: 0,
@@ -262,21 +267,12 @@ fn main() {
 
         // ---- display, differences only --------------------------------------
 
-        let lit = (st.rpm.min(REDLINE_RPM) * TACH_SEGS) / REDLINE_RPM;
+        let lit = tach_width(st.rpm);
         if lit != shown_segs {
-            let (from, to) = if lit > shown_segs.min(TACH_SEGS) {
-                (shown_segs.min(TACH_SEGS), lit)
+            if lit > shown_segs {
+                tach_span(shown_segs, lit, true);
             } else {
-                (lit, shown_segs.min(TACH_SEGS))
-            };
-            for i in from..to.min(TACH_SEGS) {
-                rect(
-                    seg_x(i),
-                    TACH_Y,
-                    TACH_W,
-                    TACH_H,
-                    if i < lit { tach_colour(i) } else { DIM },
-                );
+                tach_span(lit, shown_segs, false);
             }
             shown_segs = lit;
         }
@@ -466,18 +462,45 @@ fn throttle_from(raw: u32, centre: u32) -> u32 {
 // Drawing
 // ---------------------------------------------------------------------------
 
-fn seg_x(i: u32) -> u32 {
-    TACH_X + i * (TACH_W + TACH_GAP)
+/// Lit width in pixels for an rpm, quantised so most ticks change nothing.
+fn tach_width(rpm: u32) -> u32 {
+    let w = rpm.min(REDLINE_RPM) * TACH_W / REDLINE_RPM;
+    (w / TACH_STEP) * TACH_STEP
 }
 
-fn tach_colour(i: u32) -> u16 {
-    let rpm = i * REDLINE_RPM / TACH_SEGS;
-    if rpm >= REDLINE_RPM - 400 {
-        RED
-    } else if rpm >= SHIFT_LIGHT_RPM {
-        AMBER
-    } else {
-        GREEN
+/// Paints `[from, to)` of the bar, lit in its band colours or unlit in `DIM`.
+///
+/// **This is where the panel benchmark changed the design.** Drawing cost is a
+/// fixed ~1.16 ms per operation plus ~0.338 us per pixel, so at gauge sizes the
+/// FIXED term dominates: a 30x30 block is about 80% overhead. Discrete segments
+/// redrawn one at a time therefore cost n x 1.46 ms, and an upshift moves the
+/// needle six or seven of them at once -- about 10 ms, a third of a 30 fps
+/// frame, for one gauge.
+///
+/// A continuous bar collapses that to **at most three fills** whatever the
+/// jump, because a growing span crosses at most three colour bands and a
+/// shrinking one is a single `DIM` fill. That is why the bar is continuous
+/// rather than blocks: the alternative rule -- draw segments individually up to
+/// four, then repaint the whole bar -- cannot be done in one call, since a
+/// `fill` paints one colour and the bar has three.
+fn tach_span(from: u32, to: u32, lit: bool) {
+    if to <= from {
+        return;
+    }
+    if !lit {
+        rect(TACH_X + from, TACH_Y, to - from, TACH_H, DIM);
+        return;
+    }
+    for (lo, hi, colour) in [
+        (0, BAND_AMBER, GREEN),
+        (BAND_AMBER, BAND_RED, AMBER),
+        (BAND_RED, TACH_W, RED),
+    ] {
+        let a = from.max(lo);
+        let b = to.min(hi);
+        if b > a {
+            rect(TACH_X + a, TACH_Y, b - a, TACH_H, colour);
+        }
     }
 }
 
