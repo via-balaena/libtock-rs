@@ -107,9 +107,12 @@ const STALL_RPM: u32 = 500;
 /// Where the shift light comes on.
 const SHIFT_LIGHT_RPM: u32 = 6_200;
 
-/// Physics tick. 100 Hz — comfortable, since an app's floor is 153 us and the
-/// 10 ms excursions only appear behind a CPU-bound sibling, which this has not.
+/// How long the loop sleeps after each pass. **Not the timestep** — see below.
 const TICK_MS: u32 = 10;
+/// Clamp on measured dt, so a stall in the console or a very slow frame cannot
+/// launch the car across the map in one step.
+const DT_MIN_MS: u32 = 1;
+const DT_MAX_MS: u32 = 60;
 
 /// Drag. Linear term is rolling resistance, square term is aero. Both are
 /// FORCES, in the same units as drive -- see `apply_drag`.
@@ -235,7 +238,25 @@ fn main() {
     let mut missed_for = 0u32;
     let mut tick: u32 = 0;
 
+    let hz = Alarm::get_frequency()
+        .map(|f| f.0)
+        .unwrap_or(1_000_000)
+        .max(1);
+    let mut last = Alarm::get_ticks().unwrap_or(0);
+
     loop {
+        // MEASURED timestep, not the sleep length. `sleep_for` waits TICK_MS
+        // AFTER the work, so the real period is work + TICK_MS -- about 14.6 ms
+        // at a typical draw cost of four operations, not the 10 ms the
+        // drivetrain was tuned against. Feeding the tuned constants a fixed 10
+        // would make the car accelerate about a third slower than the host
+        // simulation said it should, and the discrepancy would read as "the
+        // torque curve is wrong".
+        let now = Alarm::get_ticks().unwrap_or(last);
+        let dt = ((now.wrapping_sub(last) as u64 * 1_000) / hz as u64) as u32;
+        let dt = dt.clamp(DT_MIN_MS, DT_MAX_MS);
+        last = now;
+
         let raw = Adc::read_single_sample_sync(THROTTLE_CH).unwrap_or(centre as u16) as u32;
         let throttle = throttle_from(raw, centre);
 
@@ -263,7 +284,7 @@ fn main() {
             }
         }
 
-        st.step(throttle);
+        st.step(throttle, dt);
 
         // ---- display, differences only --------------------------------------
 
@@ -343,11 +364,12 @@ fn main() {
         if tick % 100 == 0 {
             let _ = writeln!(
                 console,
-                "manual_dash: gear={} rpm={} kmh={} thr={} up={} dn={}{}\r",
+                "manual_dash: gear={} rpm={} kmh={} thr={} dt={}ms up={} dn={}{}\r",
                 if st.gear == 0 { 0 } else { st.gear },
                 st.rpm,
                 kmh,
                 throttle,
+                dt,
                 up_now as u8,
                 down_now as u8,
                 if st.stalled { " STALLED" } else { "" }
@@ -372,11 +394,11 @@ struct State {
 }
 
 impl State {
-    fn step(&mut self, throttle: u32) {
+    fn step(&mut self, throttle: u32, dt: u32) {
         if self.stalled {
             // Dead engine. It still rolls, and it still slows down.
             self.rpm = 0;
-            self.speed = apply_drag(self.speed, 0);
+            self.speed = apply_drag(self.speed, 0, dt);
             if self.gear == 0 {
                 self.stalled = false;
                 self.rpm = IDLE_RPM;
@@ -388,13 +410,13 @@ impl State {
             // Neutral: revs chase the throttle and fall away without it.
             let target = IDLE_RPM + (REDLINE_RPM - IDLE_RPM) * throttle / THROTTLE_FULL;
             self.rpm = if target > self.rpm {
-                (self.rpm + NEUTRAL_RISE).min(target)
+                (self.rpm + NEUTRAL_RISE * dt / 10).min(target)
             } else {
                 self.rpm
-                    .saturating_sub(NEUTRAL_FALL)
+                    .saturating_sub(NEUTRAL_FALL * dt / 10)
                     .max(target.min(IDLE_RPM))
             };
-            self.speed = apply_drag(self.speed, 0);
+            self.speed = apply_drag(self.speed, 0, dt);
             return;
         }
 
@@ -417,7 +439,7 @@ impl State {
             (torque(self.rpm) as u64 * throttle as u64 * couple) / (1_000 * 100)
         };
 
-        self.speed = apply_drag(self.speed, drive);
+        self.speed = apply_drag(self.speed, drive, dt);
     }
 }
 
@@ -440,13 +462,14 @@ fn torque(rpm: u32) -> u32 {
 /// different units -- first gear then reached the limiter in 20 ms. Caught by
 /// simulating this exact arithmetic on the host before it went to the bench,
 /// which is the only way to check a feel you cannot feel yet.
-fn apply_drag(speed: u32, drive: u64) -> u32 {
+fn apply_drag(speed: u32, drive: u64, dt: u32) -> u32 {
     let s = speed as u64;
+    let dt = dt as u64;
     let drag = (DRAG_LINEAR * s) / 1_000 + (DRAG_SQUARE * s * s) / 10_000_000;
     if drive >= drag {
-        (s + ((drive - drag) * TICK_MS as u64) / INERTIA).min(u32::MAX as u64) as u32
+        (s + ((drive - drag) * dt) / INERTIA).min(u32::MAX as u64) as u32
     } else {
-        s.saturating_sub(((drag - drive) * TICK_MS as u64) / INERTIA) as u32
+        s.saturating_sub(((drag - drive) * dt) / INERTIA) as u32
     }
 }
 
