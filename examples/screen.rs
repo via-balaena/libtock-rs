@@ -122,7 +122,21 @@ fn main() {
         }
     };
 
-    // Animation loop: cycle through rotations and color block updates
+    // The squares below sit at y=24 with height 24, and both figures are
+    // multiples of 8 on purpose.
+    //
+    // `ssd1306` and `sh1106` address their panels in 8-row pages and cannot
+    // express a frame that straddles one. They used to accept a misaligned
+    // frame and quietly reshape it -- a 20-row request painted 16 rows and
+    // returned `Ok(())` -- and since tock `45c16e8c5` they answer `INVAL`
+    // instead. This example previously asked for y=20, height=30, which is
+    // exactly that shape.
+    //
+    // **The constraint belongs to those drivers, not to the syscall API**, so
+    // `Screen::set_write_frame` still takes any rectangle and the wrapper does
+    // not enforce alignment. A multiple of 8 is simply valid everywhere, which
+    // is what a generic example wants: this one has no idea which panel it is
+    // running on. `x` and `width` are unconstrained -- paging is rows.
     let mut invert = false;
     for i in 0.. {
         // Every 4 iterations, toggle Screen inversion
@@ -144,7 +158,7 @@ fn main() {
         };
 
         // Draw a red square at (10, 20)
-        match Screen::set_write_frame(10, 20, 30, 30) {
+        match Screen::set_write_frame(10, 24, 30, 24) {
             Ok(()) => (),
             Err(e) => {
                 let _ = writeln!(Console::writer(), "{e:?}\n");
@@ -158,7 +172,7 @@ fn main() {
         };
 
         // Draw a black square at (88, 20)
-        match Screen::set_write_frame(88, 20, 30, 30) {
+        match Screen::set_write_frame(88, 24, 30, 24) {
             Ok(()) => (),
             Err(e) => {
                 let _ = writeln!(Console::writer(), "{e:?}\n");
@@ -175,7 +189,7 @@ fn main() {
         Alarm::sleep_for(Milliseconds(1000)).unwrap();
 
         // Clear the red square
-        match Screen::set_write_frame(10, 20, 30, 30) {
+        match Screen::set_write_frame(10, 24, 30, 24) {
             Ok(()) => (),
             Err(e) => {
                 let _ = writeln!(Console::writer(), "{e:?}\n");
@@ -189,7 +203,7 @@ fn main() {
         };
 
         // Draw a green square at (88, 20)
-        match Screen::set_write_frame(88, 20, 30, 30) {
+        match Screen::set_write_frame(88, 24, 30, 24) {
             Ok(()) => (),
             Err(e) => {
                 let _ = writeln!(Console::writer(), "{e:?}\n");
