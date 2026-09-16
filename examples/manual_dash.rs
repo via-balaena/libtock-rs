@@ -143,6 +143,20 @@ const INERTIA: u64 = 165_000;
 const REV_RISE_PER_S: u32 = 9_500;
 const REV_FALL_PER_S: u32 = 5_000;
 
+/// Throttle above which the clutch is out. Below it the clutch is IN -- which
+/// is the whole of Jon's control scheme, throttle-release standing in for a
+/// pedal. Sits above the stick's resting noise, measured at 0-2.
+const CLUTCH_THROTTLE: u32 = 20;
+
+/// How fast the engine converges on road speed as the clutch bites, rpm per
+/// second. **A clutch takes time to engage, and skipping that is what made the
+/// tach jump.** Assigning road speed to the engine directly moves the jump
+/// around -- from gear selection to throttle application -- rather than
+/// removing it. 15,000/s closes a 3,000 rpm gap in about 200 ms, which reads as
+/// a firm bite; the fastest the engine is ever dragged by the road in normal
+/// driving is about 3,300/s in first, so once engaged this tracks exactly.
+const CLUTCH_BITE_PER_S: u32 = 15_000;
+
 // ---------------------------------------------------------------------------
 // Palette and layout
 // ---------------------------------------------------------------------------
@@ -475,26 +489,29 @@ impl State {
         let couple = (RATIOS[self.gear] * FINAL_DRIVE) as u64;
         let implied = ((self.speed as u64 * couple) / RPM_DIVISOR) as u32;
 
-        if implied < IDLE_RPM {
-            // SLIPPING. The engine revs to the throttle, as in neutral, and its
-            // torque still reaches the wheels. This is what lets the car pull
-            // away, and it is why the tach answers the throttle at a standstill.
-            // **Lifting off IS the clutch**, which is Jon's whole control
-            // scheme, so releasing the throttle below lock speed disengages
-            // rather than loading the engine down. There is no stall here and
-            // there should not be: the gate that lets a shift through is
-            // `throttle < SHIFT_LIFT`, so any stall condition that also
-            // triggers on a released throttle makes *preparing to shift* and
-            // *stalling* the same event -- and below first gear's 4.6 km/h lock
-            // speed there was then no sequence that got out of first at all.
+        if throttle < CLUTCH_THROTTLE {
+            // CLUTCH IN. Lifting off is the clutch pedal, so a released
+            // throttle disengages: the engine returns to idle and the car
+            // coasts on drag. Selecting a gear while rolling is then a no-op
+            // until the throttle is fed, which is how a clutch actually works
+            // -- and the alternative, locking on road speed alone, snapped the
+            // tach to 3,500 rpm the instant first was selected at 20 km/h.
             //
-            // Drive already scales with throttle, so a released throttle
-            // produces no drive without needing a special case; the car simply
-            // coasts.
+            // The cost, taken deliberately: there is no engine braking. One
+            // input is doing two jobs and coherence beats completeness. If it
+            // is missed, the answer is a partial engagement on a trailing
+            // throttle, not locking on speed again.
+            self.rpm = free_rev(self.rpm, throttle, dt);
+        } else if implied < IDLE_RPM {
+            // SLIPPING. Below lock speed the engine revs to the throttle as in
+            // neutral, and its torque still reaches the wheels -- which is what
+            // lets the car pull away at all.
             self.rpm = free_rev(self.rpm.max(IDLE_RPM), throttle, dt);
         } else {
-            // LOCKED. Road speed sets the revs, as before.
-            self.rpm = implied;
+            // BITING, then locked. Converge on road speed rather than
+            // assuming it: a clutch takes time, and an instant assignment is
+            // a jump wherever it happens to land.
+            self.rpm = slew(self.rpm, implied, CLUTCH_BITE_PER_S, dt);
         }
 
         // Over the limiter the spark cuts, so no drive at all until it falls
@@ -514,10 +531,21 @@ impl State {
 /// slips, which are the same situation mechanically.
 fn free_rev(rpm: u32, throttle: u32, dt: u32) -> u32 {
     let target = IDLE_RPM + (REDLINE_RPM - IDLE_RPM) * throttle / THROTTLE_FULL;
-    if target > rpm {
-        (rpm + REV_RISE_PER_S * dt / 1_000).min(target)
+    let rate = if target > rpm {
+        REV_RISE_PER_S
     } else {
-        rpm.saturating_sub(REV_FALL_PER_S * dt / 1_000).max(target)
+        REV_FALL_PER_S
+    };
+    slew(rpm, target, rate, dt)
+}
+
+/// Move `rpm` toward `target` at `per_s`, without overshooting.
+fn slew(rpm: u32, target: u32, per_s: u32, dt: u32) -> u32 {
+    let step = per_s * dt / 1_000;
+    if target > rpm {
+        (rpm + step).min(target)
+    } else {
+        rpm.saturating_sub(step).max(target)
     }
 }
 
