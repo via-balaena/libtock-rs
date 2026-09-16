@@ -19,6 +19,25 @@ pub struct TockMonochrome8BitPage128x64Screen {
     /// `new` cannot return a `Result` without removing `Default`, and a screen
     /// whose pixel format was refused cannot draw anything correct, so the
     /// error is kept here and answered by `flush` and `setup_result`.
+    ///
+    /// **A `BUSY` stored here is not a refusal -- it means the question was
+    /// never answered.** A screen driver still running its init sequence
+    /// answers BUSY to `set_pixel_format` regardless of the format, so an
+    /// adapter constructed early records BUSY for a format that might well be
+    /// supported. Nothing re-asks: this is sampled once, in `new`.
+    ///
+    /// The effect is safe but sticky. `flush` refuses to draw, which is right,
+    /// but it reports a transient-looking code for a state that will not
+    /// change on its own. **Construct this after the screen is ready, or check
+    /// `setup_result` and rebuild if it is `BUSY`.** Re-asking on first `flush`
+    /// would fix it properly and needs interior mutability, so it is
+    /// deliberately not done here.
+    ///
+    /// On this fork the cold-boot path differs again: the capsule queues a
+    /// BUSY command and reports the driver's real answer in the upcall, which
+    /// `Screen::set_pixel_format` now reads -- so here a cold boot stores the
+    /// true `INVAL` rather than `BUSY`. That is a property of our capsule, not
+    /// of upstream's.
     setup: Result<(), ErrorCode>,
 }
 
