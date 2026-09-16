@@ -217,7 +217,11 @@ fn main() {
     // because the capsule queues a command it is not ready for and serves it
     // when it is. Everything after it is cheap.
     let (w, h) = Screen::get_resolution().unwrap_or((480, 320));
-    let mut paint = Paint::default();
+    let mut paint = Paint {
+        w,
+        h,
+        ..Default::default()
+    };
     paint.rect(0, 0, w, h, BG);
 
     let _ = writeln!(
@@ -242,10 +246,20 @@ fn main() {
 
     // Everything the display is currently showing, so only differences are
     // drawn. Deliberately impossible starting values so the first frame paints.
-    let mut shown_segs: u32 = u32::MAX;
-    let mut shown_gear_mask: u8 = 0xFF;
-    let mut shown_spd: [u8; 3] = [0xFF; 3];
-    let mut shown_light: u16 = 1;
+    // What the glass is ACTUALLY showing, which after the clear above is
+    // nothing lit. These were sentinels -- u32::MAX and 0xFF -- meant to force
+    // a full first paint, and with an XOR diff that is exactly backwards: a
+    // segment the sentinel claims is already on is never drawn, so five of the
+    // gear character's seven and six of the speed zero's were never painted and
+    // every later diff was computed against a lie. The sentinel also asked for
+    // a rectangle 4,294,967,245 pixels wide.
+    //
+    // There was nothing to force. The screen is in a known state because this
+    // app just cleared it, so the honest initial value is the true one.
+    let mut shown_segs: u32 = 0;
+    let mut shown_gear_mask: u8 = 0x00;
+    let mut shown_spd: [u8; 3] = [0x00; 3];
+    let mut shown_light: u16 = BG;
 
     let mut up_was = false;
     let mut down_was = false;
@@ -390,7 +404,7 @@ fn main() {
             let _ = writeln!(
                 console,
                 "manual_dash: gear={} rpm={} kmh={} thr={} dt={}ms up={} dn={} \
-                 draws={} err={} last={:?}{}\r",
+                 draws={} err={} clip={} last={:?}{}\r",
                 if st.gear == 0 { 0 } else { st.gear },
                 st.rpm,
                 kmh,
@@ -400,6 +414,7 @@ fn main() {
                 down_now as u8,
                 paint.calls,
                 paint.errs,
+                paint.clipped,
                 paint.last,
                 if st.stalled { " STALLED" } else { "" }
             );
@@ -605,12 +620,23 @@ fn draw_seg_diff(p: &mut Paint, x: u32, y: u32, w: u32, h: u32, t: u32, old: u8,
 struct Paint {
     calls: u32,
     errs: u32,
+    /// Rectangles refused here for falling outside the panel. A caller asking
+    /// for one is a bug in the caller, and counting it separately keeps a
+    /// programming error from hiding among real driver rejections -- the whole
+    /// value of `errs` is that zero means something.
+    clipped: u32,
     last: Option<ErrorCode>,
+    w: u32,
+    h: u32,
 }
 
 impl Paint {
     fn rect(&mut self, x: u32, y: u32, w: u32, h: u32, colour: u16) {
         if w == 0 || h == 0 {
+            return;
+        }
+        if x.saturating_add(w) > self.w || y.saturating_add(h) > self.h {
+            self.clipped += 1;
             return;
         }
         self.calls += 1;
