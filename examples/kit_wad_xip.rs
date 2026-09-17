@@ -11,9 +11,17 @@
 //! written to some spare region would fault on first read. What it *can* read
 //! is its own image, so the WAD has to travel inside the app's own TBF.
 //!
-//! This app is that arrangement at small scale. It embeds 64 KiB of a real
-//! IWAD with `include_bytes!`, which lands in `.rodata` and therefore in the
-//! process's flash slice, and then reads it.
+//! This app is that arrangement. It embeds a real IWAD with `include_bytes!`,
+//! which lands in `.rodata` and therefore in the process's flash slice, and
+//! then reads every lump the directory names. This said "64 KiB" and nothing
+//! ever sliced it -- the app walks `WAD.len()`, which is the whole file.
+//!
+//! # The WAD is not in the repository
+//!
+//! `assets/wad_trim.bin` is gitignored, so a fresh clone fails to build with a
+//! bare `couldn't read examples/assets/wad_trim.bin`. See `doom.rs` for how to
+//! produce one. This test only needs a structurally valid IWAD, so either
+//! script in `assets/` will serve it -- `doom.rs` is the one that is fussy.
 //!
 //! # What the answers mean
 //!
@@ -41,10 +49,14 @@ use libtock::runtime::{set_main, stack_size};
 set_main! {main}
 stack_size! {0x1000}
 
-/// A real, structurally valid IWAD of about 3 MB: a prefix of Freedoom's
-/// lumps with a rebuilt directory, so every lump it names is present. Not
-/// playable -- the selection is by byte budget, not by what a map needs -- but
-/// it is the right *shape* and the right *size* to prove the path.
+/// A real, structurally valid IWAD: every lump its directory names is
+/// present, which is the property this test needs.
+///
+/// This described `make_wad.py`'s output -- "about 3 MB", a byte-budget prefix
+/// of Freedoom's lumps, not playable. The file actually here is
+/// `make_min_wad.py`'s: 1.73 MB, 983 lumps, playable, selected by what one map
+/// needs. Both are valid IWADs and this app cannot tell them apart, which is
+/// exactly why the description drifted without anything failing.
 static WAD: &[u8] = include_bytes!("assets/wad_trim.bin");
 
 fn le32(b: &[u8], at: usize) -> u32 {
@@ -122,8 +134,7 @@ fn main() {
 
     let _ = writeln!(
         console,
-        "  walked {} lumps, {} bytes of lump data, edge-sum {:#x}",
-        numlumps, bytes_seen, sum
+        "  walked {numlumps} lumps, {bytes_seen} bytes of lump data, edge-sum {sum:#x}"
     );
     let _ = writeln!(
         console,

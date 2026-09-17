@@ -10,6 +10,24 @@
 //! The C is `doomgeneric` compiled for this target with clang and the libc
 //! shim in that tree's `tock/`; this file is the other side of two contracts.
 //!
+//! # The WAD is not in the repository
+//!
+//! `assets/wad_trim.bin` is gitignored -- it is 1.7 MB of derived binary -- so
+//! a fresh clone cannot build this example and fails with a bare
+//! `couldn't read examples/assets/wad_trim.bin`, which says nothing about
+//! where to get one. Build it from a Freedoom IWAD:
+//!
+//! ```text
+//! cd examples/assets
+//! python3 make_min_wad.py freedoom1.wad -m E1M1 -o wad_trim.bin
+//! ```
+//!
+//! **`make_min_wad.py`, not the sibling `make_wad.py`.** This example needs a
+//! *playable* map; `make_wad.py` selects lumps by byte budget until a size is
+//! reached, which gives the right shape for a flash-residency test and a map
+//! with no textures. The file both examples currently share is
+//! `make_min_wad.py`'s: an IWAD of 983 lumps and exactly one map, E1M1.
+//!
 //! **doomgeneric's six hooks.** `DG_Init`, `DG_DrawFrame`, `DG_SleepMs`,
 //! `DG_GetTicksMs`, `DG_GetKey`, `DG_SetWindowTitle`. They are `#[no_mangle]
 //! extern "C"` here rather than in a `doomgeneric_tock.c`, so the screen and

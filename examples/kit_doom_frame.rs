@@ -95,9 +95,9 @@ fn rgb565(r: u8, g: u8, b: u8) -> u16 {
 /// Four ramps, so a channel fault names itself. A real Doom palette comes out
 /// of the WAD's PLAYPAL lump and costs exactly the same to look up.
 fn build_palette(palette: &mut [u16; 256]) {
-    for i in 0..256usize {
+    for (i, slot) in palette.iter_mut().enumerate() {
         let v = ((i % 64) * 4) as u8;
-        palette[i] = match i / 64 {
+        *slot = match i / 64 {
             0 => rgb565(v, v, v),
             1 => rgb565(v, 0, 0),
             2 => rgb565(0, v, 0),
