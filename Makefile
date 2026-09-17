@@ -145,6 +145,18 @@ test: examples examples-async
 # silently skipped rather than run.
 	cargo test -p libtock_gpio --features async
 	cargo test -p libtock_stepper --features async
+# Same trap as `examples-async` below, on a `[[test]]` instead of an
+# `[[example]]`: `ufmt`'s only integration test declares
+# `required-features = ["std"]`, and `std` is deliberately not a default
+# feature, so `cargo test --workspace` SILENTLY SKIPS it. Verified 2026-09-16
+# by putting a syntax error in the file -- clippy, `cargo test -p ufmt` and
+# the workspace pass all stayed green, because nothing was compiling it.
+#
+# Its 20 tests had never run. They pass. Four of them (`hex`, `special_hex`,
+# `width_non_numbers`, `width_format_numbers`) were added by THIS tree in
+# `70e839c` for its own hex and width-specifier support, so the feature came
+# with tests that no gate ever executed.
+	cargo test -p ufmt --features std
 	LIBTOCK_PLATFORM=nrf52 cargo fmt --all -- --check
 	cargo clippy --all-targets $(EXCLUDE_RUNTIME) --workspace
 	LIBTOCK_PLATFORM=nrf52 cargo clippy $(EXCLUDE_STD) \
