@@ -4,15 +4,15 @@
 //! real silicon are the ones the fake kernel can only model:
 //!
 //! 1. An awaited `Sleep` resolves, after roughly the delay asked for.
-//! Caveat for RP2040 and RP2350 boards: the console half cannot be exercised
-//! there today, because of two kernel defects rather than anything in the app.
-//! `handle_deferred_call` in the chip's uart.rs invokes the client callback
-//! before setting `rx_status = Idle`, and `MuxUart::received_buffer` restarts
-//! the underlying read from inside that callback, so the restart always fails
-//! BUSY and the mux tears down every device's receive -- including the process
-//! console's. A read here is accepted and then killed by the kernel's own
-//! restart, so it never stays outstanding. Not a limitation of Tock's design:
-//! the mux multiplexes receives deliberately.
+//!    Caveat for RP2040 and RP2350 boards: the console half cannot be exercised
+//!    there today, because of two kernel defects rather than anything in the app.
+//!    `handle_deferred_call` in the chip's uart.rs invokes the client callback
+//!    before setting `rx_status = Idle`, and `MuxUart::received_buffer` restarts
+//!    the underlying read from inside that callback, so the restart always fails
+//!    BUSY and the mux tears down every device's receive -- including the process
+//!    console's. A read here is accepted and then killed by the kernel's own
+//!    restart, so it never stays outstanding. Not a limitation of Tock's design:
+//!    the mux multiplexes receives deliberately.
 //!
 //! 2. A `Sleep` dropped while armed does not poison the next one. That is the
 //!    claim that unsubscribing clears the queued upcall (TRD 104) and that
@@ -62,7 +62,7 @@ fn main() {
             return;
         }
     };
-    let _ = writeln!(console, "async_probe: alarm at {} Hz", freq);
+    let _ = writeln!(console, "async_probe: alarm at {freq} Hz");
 
     block_on::<TockSyscalls, _>(async {
         // 1. A plain awaited sleep.
@@ -71,7 +71,7 @@ fn main() {
             Ok(sleep) => match sleep.await {
                 Ok(()) => {
                     let elapsed = Alarm::get_ticks().unwrap_or(0).wrapping_sub(start);
-                    let _ = writeln!(console, "await 500ms: {} ticks elapsed", elapsed);
+                    let _ = writeln!(console, "await 500ms: {elapsed} ticks elapsed");
                 }
                 Err(_) => {
                     let _ = writeln!(console, "await 500ms: FAILED");
@@ -100,7 +100,7 @@ fn main() {
             Ok(sleep) => match sleep.await {
                 Ok(()) => {
                     let elapsed = Alarm::get_ticks().unwrap_or(0).wrapping_sub(start);
-                    let _ = writeln!(console, "await 500ms after cancel: {} ticks", elapsed);
+                    let _ = writeln!(console, "await 500ms after cancel: {elapsed} ticks");
                 }
                 Err(_) => {
                     let _ = writeln!(console, "await 500ms after cancel: FAILED");
@@ -152,7 +152,7 @@ fn main() {
         {
             Either::Left(_) => {
                 let elapsed = Alarm::get_ticks().unwrap_or(0).wrapping_sub(start);
-                let _ = writeln!(console, "select: timeout won after {} ticks", elapsed);
+                let _ = writeln!(console, "select: timeout won after {elapsed} ticks");
             }
             Either::Right(Ok(output)) => {
                 let _ = writeln!(
@@ -163,7 +163,7 @@ fn main() {
                 );
             }
             Either::Right(Err(e)) => {
-                let _ = writeln!(console, "select: read won but failed: {:?}", e);
+                let _ = writeln!(console, "select: read won but failed: {e:?}");
             }
         }
 
@@ -177,7 +177,7 @@ fn main() {
             .is_ok()
         {
             let elapsed = Alarm::get_ticks().unwrap_or(0).wrapping_sub(start);
-            let _ = writeln!(console, "after select: 500ms -> {} ticks", elapsed);
+            let _ = writeln!(console, "after select: 500ms -> {elapsed} ticks");
         }
 
         // 5. The other direction: a read that wins, cancelling a five second
@@ -215,7 +215,7 @@ fn main() {
             .is_ok()
         {
             let elapsed = Alarm::get_ticks().unwrap_or(0).wrapping_sub(start);
-            let _ = writeln!(console, "after 5s cancel: 500ms -> {} ticks", elapsed);
+            let _ = writeln!(console, "after 5s cancel: 500ms -> {elapsed} ticks");
         }
 
         let _ = writeln!(console, "async_probe: done");

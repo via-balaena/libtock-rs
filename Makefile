@@ -183,6 +183,15 @@ test: examples examples-async
 		--target=thumbv7em-none-eabi
 	LIBTOCK_PLATFORM=opentitan cargo clippy --examples \
 		--target=riscv32imc-unknown-none-elf
+# And the feature-gated examples need their own lint pass for exactly the
+# reason `examples-async` needs its own build pass: the featureless run above
+# skips any example whose required-features are unmet, silently. Adding the
+# lint pass above without this one left the same hole one level down --
+# `async_probe` had 16 warnings and was being compiled by CI the whole time.
+	LIBTOCK_PLATFORM=nrf52 cargo clippy --examples --features=async \
+		--target=thumbv7em-none-eabi
+	LIBTOCK_PLATFORM=opentitan cargo clippy --examples --features=async \
+		--target=riscv32imc-unknown-none-elf
 	cd nightly && \
 		MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" \
 		cargo miri test $(EXCLUDE_MIRI) --manifest-path=../Cargo.toml \
