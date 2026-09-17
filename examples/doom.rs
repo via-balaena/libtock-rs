@@ -71,9 +71,11 @@ use libtock::runtime::{set_main, stack_size};
 
 set_main! {main}
 
-/// Doom recurses through the BSP, so this is not a formality. Not yet measured
-/// -- 32 KiB is a guess with room in it, and the first thing to shrink if the
-/// zone needs more.
+// Doom recurses through the BSP, so this is not a formality. Still not
+// measured -- 4 KiB is a guess, and it has been shrunk twice to feed the zone
+// (0x8000 -> 0x2000 in `1d79ce1`, -> 0x1000 in `e0c6685`). This said "32 KiB
+// ... with room in it" through both, which read as headroom that was already
+// spent. If the zone needs more, this is no longer the cheap place to find it.
 stack_size! {0x1000}
 
 const DOOM_W: usize = 320;
@@ -224,8 +226,13 @@ pub static mut tock_wad_length: usize = 0;
 #[no_mangle]
 pub static mut tock_wad_name: *const u8 = core::ptr::null();
 
+/// # Safety
+///
+/// `buf` must either be null or point to `len` initialised bytes that stay
+/// valid for reads for the duration of the call. Called only by the C shim,
+/// which passes a buffer it owns.
 #[no_mangle]
-pub extern "C" fn tock_console_write(buf: *const u8, len: usize) {
+pub unsafe extern "C" fn tock_console_write(buf: *const u8, len: usize) {
     if buf.is_null() || len == 0 {
         return;
     }
@@ -240,7 +247,7 @@ pub extern "C" fn tock_ticks_ms() -> u32 {
     Alarm::get_milliseconds().unwrap_or(0) as u32
 }
 
-/// The shim's own accounting, which nothing has read back until now.
+// The shim's own accounting, which nothing has read back until now.
 extern "C" {
     fn tock_alloc_stats(used: *mut usize, peak: *mut usize, calls: *mut u32, dropped: *mut u32);
     /// Doom's own zone: peak, current, total free, and the LARGEST run it
@@ -319,8 +326,7 @@ fn report_budget<W: Write>(console: &mut W) {
     unsafe { DG_ZoneStats(&mut zp, &mut zn, &mut zf, &mut zl) }
     let _ = writeln!(
         console,
-        "doom: zone {} KiB: peak {zp}, now {zn}, free {zf}, largest run {zl}",
-        ZONE_KIB
+        "doom: zone {ZONE_KIB} KiB: peak {zp}, now {zn}, free {zf}, largest run {zl}"
     );
     // SAFETY: single-threaded read of values the frame path writes.
     let (cms, fms, bms, bb) = unsafe { (CONV_MS, FRAME_MS, BLIT_MS, BLIT_BYTES) };
@@ -565,8 +571,14 @@ fn sample_input() -> [bool; 6] {
 /// The inputs are sampled once per burst, not once per call: a burst is at
 /// most seven calls and re-reading the converter on each would be fourteen
 /// syscalls where two will do.
+///
+/// # Safety
+///
+/// `pressed` and `key` must be valid, aligned, writable pointers to an `i32`
+/// and a `u8`. They are written only when this returns 1. Called only by
+/// doomgeneric, which passes pointers to its own locals.
 #[no_mangle]
-pub extern "C" fn DG_GetKey(pressed: *mut i32, key: *mut u8) -> i32 {
+pub unsafe extern "C" fn DG_GetKey(pressed: *mut i32, key: *mut u8) -> i32 {
     // SAFETY: single-threaded, and this is the only writer of these.
     unsafe {
         if !IN_BURST {
