@@ -37,7 +37,7 @@ fn main() {
     let mut console = Console::writer();
 
     let pins = TockSyscalls::command(DRIVER_NUM, CMD_PIN_COUNT, 0, 0).to_result::<u32, ErrorCode>();
-    let _ = writeln!(console, "pwm-owner: driver reports {:?} pins", pins);
+    let _ = writeln!(console, "pwm-owner: driver reports {pins:?} pins");
 
     // The capsule packs the pin and the duty cycle into one argument.
     let packed = PIN | (DUTY << 16);

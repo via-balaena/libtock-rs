@@ -155,6 +155,22 @@ test: examples examples-async
 		--target=thumbv7em-none-eabi --workspace
 	LIBTOCK_PLATFORM=hifive1 cargo clippy $(EXCLUDE_STD) --features=async \
 		--target=riscv32imac-unknown-none-elf --workspace
+# Examples need a pass of their own, and it is not an oversight that the
+# passes above miss them. The host pass excludes `libtock`, which is the crate
+# that owns `examples/`, and the embedded passes cannot use `--all-targets`:
+# that pulls in the lib test harness, which needs `test` and so `std`, and
+# fails on a bare-metal target. So `--examples` is the only spelling that
+# works here.
+#
+# Verified by planting a `needless_bool` in an example, 2026-09-16: every pass
+# above reports it zero times and `make examples` reports it zero times,
+# because that target is a `cargo build` and a build is not a lint. These two
+# lines catch it. The platforms match `make examples` -- opentitan rather than
+# hifive1 for RISC-V, because hifive1 lacks atomics.
+	LIBTOCK_PLATFORM=nrf52 cargo clippy --examples \
+		--target=thumbv7em-none-eabi
+	LIBTOCK_PLATFORM=opentitan cargo clippy --examples \
+		--target=riscv32imc-unknown-none-elf
 	cd nightly && \
 		MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" \
 		cargo miri test $(EXCLUDE_MIRI) --manifest-path=../Cargo.toml \

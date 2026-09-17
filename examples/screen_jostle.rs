@@ -78,10 +78,18 @@ fn main() {
     // error rather than a comment.
     const SETTLE_MS: u32 = 50;
     /// Long enough for B to reach the capsule. Measured: B issues at ~2.8 ms.
+    ///
+    /// `allow(dead_code)` because rustc does not count a use inside an
+    /// anonymous `const _`, and both of these are used only by the assertions
+    /// below. The guard is real -- setting `SETTLE_MS` to 2000 fails the build
+    /// with "settle is too long" -- so deleting these to satisfy the lint
+    /// would delete a working compile-time check.
+    #[allow(dead_code)]
     const MIN_SETTLE_MS: u32 = 1;
     /// The panel's init gap. Past this the driver is idle, there is nothing to
     /// dequeue into, and the run is inert -- it reports SURVIVED on a kernel
     /// known to be broken. Measured at 1,239 ms on the kit's ST7796.
+    #[allow(dead_code)]
     const INIT_GAP_MS: u32 = 1_239;
     const _: () = assert!(
         SETTLE_MS >= MIN_SETTLE_MS,

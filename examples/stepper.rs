@@ -57,10 +57,10 @@ fn main() {
             // movement was stopped, and the count is how the caller knows where
             // the motor ended up.
             Ok(taken) => {
-                let _ = writeln!(console, "stepper: {} {} steps", label, taken);
+                let _ = writeln!(console, "stepper: {label} {taken} steps");
             }
             Err(error) => {
-                let _ = writeln!(console, "stepper: {} failed: {:?}", label, error);
+                let _ = writeln!(console, "stepper: {label} failed: {error:?}");
                 return;
             }
         }

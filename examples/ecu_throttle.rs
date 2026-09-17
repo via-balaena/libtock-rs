@@ -117,7 +117,7 @@ fn main() {
         // A reading outside the band is a wiring fault. Disarm rather than
         // treat it as a position: the capsule will close the output, and this
         // app stops rather than guessing.
-        if raw < BAND_LOW || raw > BAND_HIGH {
+        if !(BAND_LOW..=BAND_HIGH).contains(&raw) {
             let _ = writeln!(
                 console,
                 "ecu: pedal {raw} is outside {BAND_LOW}..{BAND_HIGH} -- FAULT, disarming"

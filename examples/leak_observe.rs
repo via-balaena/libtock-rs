@@ -42,7 +42,7 @@ fn main() {
     let mut c = Console::writer();
     Alarm::sleep_for(Milliseconds(4000)).unwrap();
 
-    writeln!(c, "").unwrap();
+    writeln!(c).unwrap();
     writeln!(
         c,
         "[B] --- process A has exited; LED should still be lit ---"

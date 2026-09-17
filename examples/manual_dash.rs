@@ -416,7 +416,7 @@ fn main() {
             shown_gear_mask = gear_mask;
         }
 
-        let kmh = (st.speed * 36 / 10_000).min(999) as u32;
+        let kmh = (st.speed * 36 / 10_000).min(999);
         let want = [
             if kmh >= 100 {
                 DIGITS[(kmh / 100) as usize % 10]
@@ -448,9 +448,7 @@ fn main() {
             }
         }
 
-        if missed_for > 0 {
-            missed_for -= 1;
-        }
+        missed_for = missed_for.saturating_sub(1);
 
         tick = tick.wrapping_add(1);
         if tick % 100 == 0 {

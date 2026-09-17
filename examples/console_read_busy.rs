@@ -77,5 +77,5 @@ fn main() {
     let mut buffer = [0u8; 16];
     let (count, result) = Console::read(&mut buffer);
 
-    let _ = writeln!(console, "read -> {} bytes, {:?}", count, result);
+    let _ = writeln!(console, "read -> {count} bytes, {result:?}");
 }

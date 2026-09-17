@@ -26,36 +26,30 @@ fn main() {
     // Configure the radio
     let pan: u16 = 0xcafe;
     let addr_short: u16 = 0xdead;
-    let addr_long: u64 = 0xdead_dad;
+    let addr_long: u64 = 0x0dea_ddad;
     let tx_power: i8 = 4;
     let channel: u8 = 11;
 
     writeln!(Console::writer(), "Configuring IEEE 802.15.4 radio...\n").unwrap();
 
     Ieee802154::set_pan(pan);
-    writeln!(Console::writer(), "Set PAN to {:#06x}\n", pan).unwrap();
+    writeln!(Console::writer(), "Set PAN to {pan:#06x}\n").unwrap();
 
     Ieee802154::set_address_short(addr_short);
     writeln!(
         Console::writer(),
-        "Set short address to {:#06x}\n",
-        addr_short
+        "Set short address to {addr_short:#06x}\n"
     )
     .unwrap();
 
     Ieee802154::set_address_long(addr_long);
-    writeln!(
-        Console::writer(),
-        "Set long address to {:#018x}\n",
-        addr_long
-    )
-    .unwrap();
+    writeln!(Console::writer(), "Set long address to {addr_long:#018x}\n").unwrap();
 
     Ieee802154::set_tx_power(tx_power).unwrap();
-    writeln!(Console::writer(), "Set TX power to {}\n", tx_power).unwrap();
+    writeln!(Console::writer(), "Set TX power to {tx_power}\n").unwrap();
 
     Ieee802154::set_channel(channel).unwrap();
-    writeln!(Console::writer(), "Set channel to {}\n", channel).unwrap();
+    writeln!(Console::writer(), "Set channel to {channel}\n").unwrap();
 
     // Don't forget to commit the config!
     Ieee802154::commit_config();
@@ -76,7 +70,7 @@ fn main() {
     ];
     fn set_buf_cnt(buf: &mut [u8], counter: &mut usize) {
         let buf_len = buf.len();
-        let buf_cnt = &mut buf[buf_len - core::mem::size_of_val(&counter)..];
+        let buf_cnt = &mut buf[buf_len - core::mem::size_of_val(counter)..];
         buf_cnt.copy_from_slice(&counter.to_be_bytes());
     }
 

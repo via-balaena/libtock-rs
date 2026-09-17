@@ -109,8 +109,8 @@ pub const TX_LED: u32 = 2;
 ///
 /// * `buf`: the buffer in which to append the metadata to.
 /// * `n_bytes`: length of data message body of the next message this is
-///              stored in the packet header, so that the host can
-///              determine the data message read length.
+///   stored in the packet header, so that the host can determine the data
+///   message read length.
 ///
 /// # Returns
 ///
@@ -181,7 +181,7 @@ fn main() {
 
         if let Err(why) = I2CMasterSlave::i2c_master_slave_write_sync(
             target_id,
-            &mut rx_buf[HEADER_LEN..HEADER_LEN + msg_len as usize],
+            &rx_buf[HEADER_LEN..HEADER_LEN + msg_len as usize],
             msg_len,
         ) {
             led_on(PANIC_LED);
@@ -208,12 +208,12 @@ fn main() {
         // Write header first, this allows the host to know how many bytes to
         // expect in the following data message.
         led_on(TX_LED);
-        if Console::write(&mut header).is_err() {
+        if Console::write(&header).is_err() {
             led_on(PANIC_LED);
         }
 
         // Data message body.
-        if Console::write(&mut rx_buf[HEADER_LEN..HEADER_LEN + r.0]).is_err() {
+        if Console::write(&rx_buf[HEADER_LEN..HEADER_LEN + r.0]).is_err() {
             led_on(PANIC_LED);
         }
         led_off(TX_LED);
