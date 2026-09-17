@@ -23,10 +23,27 @@
 //!
 //! # Memory
 //!
-//! A process here gets 392 KiB, and every number below is spent against that.
+//! A process here gets **480 KiB** on the Pico 2 W -- `raspberry_pi_pico_2_w`
+//! in `build_scripts`, RAM at `0x2000A000` -- and every number below is spent
+//! against that. This said 392 KiB, which is the plain Pico 2's row; the W has
+//! more, and this example only builds for the W.
+//!
+//! **The linker's spare is not the process's spare.** `arm-none-eabi-size -A`
+//! says stack 4,096 + .data 20,136 + .bss 458,856 = 483,088 of 491,520, which
+//! looks like 8,432 free. It is not: Tock puts its own structures in the same
+//! region. `process doom` on the console shows Grant Ptrs 72, Upcalls 320,
+//! Process 804, Grant 188 and a 1,872 byte Rust heap on top of the app's own
+//! 483,088 -- 486,344 allocated, so **5,176 is actually unused**.
+//!
+//! Taking the linker's 8 KiB built and linked cleanly and then would not load
+//! at all, with the app simply absent from `list` and nothing printed. 4 KiB
+//! of the real 5,176 is what `HEAP_BYTES` takes here.
 //! `HEAP_BYTES` is what the shim's allocator hands out and is almost entirely
-//! Doom's zone, which takes it in one call; the zone size is passed as `-kb`
-//! so the two cannot silently disagree. `DG_ScreenBuffer` costs nothing
+//! Doom's zone, which takes it in one call; `ZONE_KIB` is rendered into the
+//! `-kb` argument at startup so the two cannot silently disagree. They could
+//! until 2026-09-15: the argument was the literal `b"256"` and ignored
+//! `ZONE_KIB` entirely, so raising the constant moved the printed number and
+//! left the zone where it was. `DG_ScreenBuffer` costs nothing
 //! because `I_InitGraphics` aliases it onto `I_VideoBuffer` -- the frame is
 //! 8-bit paletted on both sides, so a second buffer would only hold a copy.
 //!
@@ -127,10 +144,10 @@ fn build_scale_maps() {
 
 /// What the shim's allocator hands out. Doom's zone takes nearly all of it in
 /// one call, so this and `ZONE_KIB` move together.
-const HEAP_BYTES: usize = 288 * 1024;
+const HEAP_BYTES: usize = 292 * 1024;
 /// Passed to Doom as `-kb`. Leaves the heap a few KiB for the handful of
 /// strings Doom duplicates outside the zone.
-const ZONE_KIB: usize = 256;
+const ZONE_KIB: usize = 260;
 
 /// The panel spends over a second in its init sequence and answers BUSY until
 /// it is done. Measured at 1225 ms from userspace.
@@ -684,7 +701,12 @@ static mut ARG0: [u8; 5] = *b"doom\0";
 static mut ARG_IWAD: [u8; 6] = *b"-iwad\0";
 static mut ARG_WAD: [u8; 9] = *b"doom.wad\0";
 static mut ARG_KB: [u8; 4] = *b"-kb\0";
-static mut ARG_KB_N: [u8; 8] = *b"256\0\0\0\0\0";
+/// The `-kb` value, filled in from [`ZONE_KIB`] at startup by [`render_kib`].
+///
+/// Deliberately not a literal. It was `b"256"` and independent of `ZONE_KIB`,
+/// which made the two free to disagree -- and they did, silently, the first
+/// time the constant was raised.
+static mut ARG_KB_N: [u8; 8] = [0; 8];
 /* Straight into the map. Without this Doom starts at the title screen and
  * wants TITLEPIC, the demo lumps and the rest of the attract loop -- none of
  * which a WAD trimmed to one map carries, and none of which this build is
@@ -694,6 +716,37 @@ static mut ARG_WARP: [u8; 6] = *b"-warp\0";
 static mut ARG_EP: [u8; 2] = *b"1\0";
 static mut ARG_MAP: [u8; 2] = *b"1\0";
 static mut ARGV: [*mut u8; 8] = [core::ptr::null_mut(); 8];
+
+/// Write `ZONE_KIB` into `buf` as a NUL-terminated decimal string.
+///
+/// `buf` is zeroed first, so the NUL is whatever digits do not reach.
+const fn render_kib(mut n: usize) -> [u8; 8] {
+    let mut digits = [0u8; 8];
+    let mut count = 0;
+    if n == 0 {
+        digits[0] = b'0';
+        count = 1;
+    } else {
+        while n > 0 {
+            digits[count] = b'0' + (n % 10) as u8;
+            n /= 10;
+            count += 1;
+        }
+    }
+    // `digits` is least-significant first; reverse into the result.
+    let mut out = [0u8; 8];
+    let mut i = 0;
+    while i < count {
+        out[i] = digits[count - 1 - i];
+        i += 1;
+    }
+    out
+}
+
+// Seven digits plus a NUL is the buffer, and a zone that large cannot exist
+// on this part -- but the check is free and the failure would be a truncated
+// argument Doom silently misreads.
+const _: () = assert!(ZONE_KIB < 10_000_000);
 
 fn main() {
     let mut console = Console::writer();
@@ -763,6 +816,8 @@ fn main() {
         ARGV[1] = addr_of_mut!(ARG_IWAD) as *mut u8;
         ARGV[2] = addr_of_mut!(ARG_WAD) as *mut u8;
         ARGV[3] = addr_of_mut!(ARG_KB) as *mut u8;
+        // Fill the value in from the constant rather than trusting a literal.
+        *addr_of_mut!(ARG_KB_N) = render_kib(ZONE_KIB);
         ARGV[4] = addr_of_mut!(ARG_KB_N) as *mut u8;
         ARGV[5] = addr_of_mut!(ARG_WARP) as *mut u8;
         ARGV[6] = addr_of_mut!(ARG_EP) as *mut u8;
