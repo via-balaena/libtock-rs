@@ -161,3 +161,105 @@ fn read_stack_size(cli: &Cli) -> String {
 
     panic!("Unable to find the .stack section in {}", cli.elf.display());
 }
+
+/// Keeps the three hand-maintained platform lists from drifting apart.
+///
+/// Adding a platform takes three separate edits in three files: a `PLATFORMS`
+/// row in `build_scripts/src/lib.rs`, a `platform_build` call in the
+/// `Makefile`, and an arm in `get_platform_architecture` above. Nothing
+/// resolves one list against another, so a platform missing from any of them
+/// is invisible to every gate that compiles code -- the lists are data, and a
+/// build only ever exercises the one platform it was asked for.
+///
+/// Found by enumeration rather than by a probe: reconciling the three lists
+/// turned up `teensy40`, which the architecture map knows and the other two do
+/// not. That direction is deliberate here and is asserted as such below.
+#[cfg(test)]
+mod platform_lists {
+    use super::get_platform_architecture;
+    use std::collections::BTreeSet;
+
+    fn read(relative: &str) -> String {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../").to_string() + relative;
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
+    }
+
+    /// Names in the `PLATFORMS` table, which is a fixed-shape tuple per line.
+    fn table() -> BTreeSet<String> {
+        read("build_scripts/src/lib.rs")
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim_start().strip_prefix("(\"")?;
+                Some(rest.split('"').next()?.to_string())
+            })
+            .collect()
+    }
+
+    /// Names passed to the Makefile's `platform_build` macro.
+    fn makefile() -> BTreeSet<String> {
+        read("Makefile")
+            .lines()
+            .filter_map(|line| {
+                let rest = line.split("platform_build,").nth(1)?;
+                Some(rest.split(',').next()?.to_string())
+            })
+            .collect()
+    }
+
+    /// The parsers are the weak point of this test -- a silently empty set
+    /// would make every assertion below pass. Both counts are pinned low
+    /// rather than exactly, so adding a platform does not fail this.
+    #[test]
+    fn parsers_find_something() {
+        assert!(table().len() > 20, "PLATFORMS parser found {:?}", table());
+        assert!(
+            makefile().len() > 20,
+            "platform_build parser found {:?}",
+            makefile()
+        );
+    }
+
+    /// Every documented platform must be buildable from the Makefile, and
+    /// every Makefile target must have a layout to build against. A target
+    /// without a row panics in the build script rather than failing usefully.
+    #[test]
+    fn table_and_makefile_agree() {
+        assert_eq!(
+            table(),
+            makefile(),
+            "PLATFORMS and the Makefile's platform_build calls disagree"
+        );
+    }
+
+    /// Every platform with a layout must have an architecture, or `elf2tab`
+    /// cannot package what the build produces. This calls the real function
+    /// rather than parsing its match arms.
+    #[test]
+    fn every_platform_has_an_architecture() {
+        let missing: Vec<_> = table()
+            .into_iter()
+            .filter(|p| get_platform_architecture(p).is_none())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "PLATFORMS rows with no arm in get_platform_architecture: {missing:?}"
+        );
+    }
+
+    /// The reverse direction is allowed, and this pins why. The architecture
+    /// map may name a platform that has no layout here: `LIBTOCK_PLATFORM` for
+    /// it then panics in the build script, loudly and at build time, so it is
+    /// dead weight rather than a hazard. Asserted rather than left implicit so
+    /// that the asymmetry is a decision and not an oversight.
+    #[test]
+    fn architecture_map_may_be_a_superset() {
+        assert!(
+            get_platform_architecture("teensy40").is_some(),
+            "teensy40 lost its architecture arm; if that was deliberate, delete this test"
+        );
+        assert!(
+            !table().contains("teensy40"),
+            "teensy40 gained a PLATFORMS row -- good, but this test now asserts nothing"
+        );
+    }
+}
